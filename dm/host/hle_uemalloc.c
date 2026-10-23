@@ -91,6 +91,7 @@ static const char *g_what;
 
 // Observation gate OBS_UE_MALLOC: the allocator object GCreateMalloc just made (x19), before anything calls it
 static void obj_made(const uint64_t *regs) {
+    if (!regs[19]) die("%s: Unreal's allocator object is null (its malloc failed: malloc has no memory yet, or none is left)", g_what);
     *(void **)(uintptr_t)regs[19] = g_vt;
     static int once; if (!once++) LOG("%s: Unreal's allocator (FMallocBinned3, made at run time at %#llx) runs on a host malloc zone", g_what, (unsigned long long)regs[19]);
 }
