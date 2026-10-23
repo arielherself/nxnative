@@ -120,13 +120,15 @@ void dm_srclib_prepare_start(const char *cdir) {
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         NSFileManager *fm = NSFileManager.defaultManager;
         // the source libraries and what identifies this set of them: their paths and sizes
-        NSMutableArray<NSString *> *srcs = [NSMutableArray array]; NSMutableString *ident = [NSMutableString stringWithString:@"dm_srclib 1\n"];
+        NSMutableArray<NSString *> *srcs = [NSMutableArray array]; NSMutableSet<NSString *> *packs = [NSMutableSet set]; NSMutableString *ident = [NSMutableString stringWithString:@"dm_srclib 1\n"];
         NSDirectoryEnumerator *en = [fm enumeratorAtPath:dir];
         for (NSString *rel in en) {
             if (![rel hasSuffix:@".metallib"]) continue;
             NSString *p = [dir stringByAppendingPathComponent:rel];
-            int fd = open(p.fileSystemRepresentation, O_RDONLY); char m[4] = {0}; ssize_t got = fd >= 0 ? read(fd, m, 4) : -1; struct stat st = {0}; if (fd >= 0) { fstat(fd, &st); close(fd); }
-            if (got == 4 && dm_srclib_is_source(m, 4)) { [srcs addObject:rel]; [ident appendFormat:@"%@\t%lld\n", rel, (long long)st.st_size]; }   // a source library or a source pack
+            int fd = open(p.fileSystemRepresentation, O_RDONLY); char m[sizeof PACK_MAGIC] = {0}; ssize_t got = fd >= 0 ? read(fd, m, sizeof m - 1) : -1; struct stat st = {0}; if (fd >= 0) { fstat(fd, &st); close(fd); }
+            if (got < 4 || !dm_srclib_is_source(m, (size_t)got)) continue;   // a metallib
+            [srcs addObject:rel]; [ident appendFormat:@"%@\t%lld\n", rel, (long long)st.st_size];   // a source library, or a source pack
+            if (is_pack(m, (size_t)got)) [packs addObject:rel];
         }
         if (!srcs.count) { atomic_store(&g_running, 0); return; }   // compiled metallibs (a Mac build): nothing to do
         // the marker: Library/Caches/dm_srclib/<hash of the set>.done, holding the sources that did not compile
@@ -151,9 +153,9 @@ void dm_srclib_prepare_start(const char *cdir) {
         // the units to compile: each source library, and each part of a source pack (by its first entry point)
         NSMutableArray<NSArray *> *units = [NSMutableArray array];
         for (NSString *rel in srcs) {
-            NSData *d = map_file([dir stringByAppendingPathComponent:rel]);
-            if (d && is_pack(d.bytes, d.length)) {
-                NSString *text = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+            if ([packs containsObject:rel]) {
+                NSData *d = map_file([dir stringByAppendingPathComponent:rel]);
+                NSString *text = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
                 for (NSArray *part in pack_parts(text ?: @"")) [units addObject:@[[NSString stringWithFormat:@"%@#%@", rel, [part[0] firstObject]], part[1]]];
             } else [units addObject:@[rel, NSNull.null]];
         }
