@@ -1582,6 +1582,10 @@ static void up_begin(void) {
     up_owner_check("up_begin");
     if (g_up_cb) return;
     unsigned slot = g_up_seq++ % 3;
+    // The slot's last batch may still be only a commit record in the encode thread's current block (rec_commit_upload), which is handed over when it fills or the submission drains:
+    // waiting without handing it over waited for a batch never committed. Little Nightmares II's first render passes zero-filled enough new targets to come round to a slot within one
+    // block, and its RHI thread waited for good inside nvnQueueSubmitCommands (q_cb drains before it waits for the same reason)
+    if (atomic_load(&g_up_alloc_busy[slot])) rec_publish();
     up_wait_zero(&g_up_alloc_busy[slot]);
     atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
     [g_up_alloc4[slot] reset];
