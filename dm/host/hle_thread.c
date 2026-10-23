@@ -469,10 +469,16 @@ static void thr_bt(thr_t *t) {
             if (sp > 0x100000000ull && !vm_read_overwrite(mach_task_self(), sp, sizeof stk, (vm_address_t)stk, &g) && g == sizeof stk)
                 for (int r = 0; r < 128; r += 8) fprintf(stderr, "[dm]   %#x stack sp+%#05x: %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx\n", t->handle, r * 8,
                         stk[r], stk[r + 1], stk[r + 2], stk[r + 3], stk[r + 4], stk[r + 5], stk[r + 6], stk[r + 7]); }
-        char line[1024]; int p = snprintf(line, sizeof line, "[dm]   %#x backtrace:", t->handle), nf = 0;
-        for (int k = 0; k < 64 && fp && nf < 20 && p < (int)sizeof line - 40; k++) {
-            module_t *m = module_of((void *)lr);
-            if (m) { p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, lr - (uint64_t)m->base); nf++; }
+        // Guest frames as module+offset; host frames (a guest thread inside a host function: an NVN call waiting on a host lock) named with dladdr, from pc on, so a thread
+        // that waits in the host shows where (Little Nightmares II's RHIThread inside nvnQueueSubmitCommands showed only its guest frames)
+        char line[1600]; int p = snprintf(line, sizeof line, "[dm]   %#x backtrace:", t->handle), nf = 0, nh = 0;
+        for (int k = -1; k < 64 && (k < 0 || fp) && nf < 20 && p < (int)sizeof line - 80; k++) {
+            uint64_t at = k < 0 ? __darwin_arm_thread_state64_get_pc(st) : lr;
+            module_t *m = module_of((void *)at); Dl_info di;
+            if (m) { p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, at - (uint64_t)m->base); nf++; }
+            else if (nh++ < 12) p += dladdr((void *)at, &di) && di.dli_sname ? snprintf(line + p, sizeof line - p, " [%s+%#lx]", di.dli_sname, (unsigned long)(at - (uint64_t)di.dli_saddr))
+                                                                               : snprintf(line + p, sizeof line - p, " [%#llx]", at);
+            if (k < 0) continue;
             uint64_t fr[2]; vm_size_t g2 = 0;
             if (vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &g2) || g2 != 16 || fr[0] <= fp) break;
             fp = fr[0]; lr = fr[1];
