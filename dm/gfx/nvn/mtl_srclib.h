@@ -8,6 +8,10 @@
 // (dm_srclib_options); name (the file name) is for the log and the first-start pass's list of sources that do not compile
 id<MTLLibrary> dm_srclib_load(id<MTLDevice> dev, const void *bytes, size_t len, dispatch_data_t data, NSString *name, NSError **err);
 MTLCompileOptions *dm_srclib_options(void);
+// The Vulkan and GL layers' one library per game (vk_shaders.py, gl_shaders.py): a metallib (newLibraryWithURL), or an MSL source pack, whose parts (one shader's MSL each, headed by its
+// entry points) compile when a function of theirs is first asked for. dm_srclib_function: the function of either (nil when it has none or its part does not compile)
+id dm_srclib_open(id<MTLDevice> dev, NSString *path, NSError **err);
+id<MTLFunction> dm_srclib_function(id lib, NSString *name);
 #endif
 int dm_srclib_is_source(const void *bytes, size_t len);   // no metallib magic: an MSL source library
 // First start: compile every MSL source library under dir (DM_MSL_DIR) once, in the background, so the system's Metal shader cache holds them before the game asks for them (a compile

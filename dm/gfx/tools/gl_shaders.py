@@ -23,6 +23,7 @@
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, subprocess, sys, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import msl_pack
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mvgl
 
@@ -161,6 +162,7 @@ def one(item, tmp):
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
+    if msl_pack.SOURCE: return msl_pack.write(msls, os.path.join(out, 'gl_shaders.metallib'))   # no Metal compiler here (Linux): an MSL source pack, compiled on the device (msl_pack.py)
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'
         r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fpreserve-invariance', *extra, m, '-o', a], capture_output=True, text=True)

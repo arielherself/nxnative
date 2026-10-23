@@ -47,6 +47,51 @@ id<MTLLibrary> dm_srclib_load(id<MTLDevice> dev, const void *bytes, size_t len, 
     return lib;
 }
 
+// ---- Source packs: the Vulkan and GL layers' one library (vk_shaders.py / gl_shaders.py pack_msl). The file starts with PACK_MAGIC; each part with a line "//@@part <entry> [<entry>...]",
+// then that shader's MSL up to the next part line ----
+#define PACK_MAGIC "//@@dmsh-msl-pack 1\n"
+#define PART_TAG "//@@part "
+static int is_pack(const void *b, size_t n) { return n >= sizeof PACK_MAGIC - 1 && !memcmp(b, PACK_MAGIC, sizeof PACK_MAGIC - 1); }
+// the parts of a pack: [(entry names, MSL)]
+static NSArray<NSArray *> *pack_parts(NSString *text) {
+    NSMutableArray *out = [NSMutableArray array];
+    NSArray<NSString *> *chunks = [text componentsSeparatedByString:@"\n" PART_TAG];
+    for (NSUInteger i = 1; i < chunks.count; i++) {
+        NSRange nl = [chunks[i] rangeOfString:@"\n"]; if (nl.location == NSNotFound) continue;
+        NSArray *names = [[chunks[i] substringToIndex:nl.location] componentsSeparatedByString:@" "];
+        [out addObject:@[names, [chunks[i] substringFromIndex:nl.location + 1]]];
+    }
+    return out;
+}
+@interface DmSrcPack : NSObject { @public id<MTLDevice> dev; NSMutableDictionary<NSString *, NSString *> *src; NSMutableDictionary<NSString *, id> *lib; NSString *path; os_unfair_lock lock; } @end
+@implementation DmSrcPack @end
+
+id dm_srclib_open(id<MTLDevice> dev, NSString *path, NSError **err) {
+    NSData *d = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:err];
+    if (!d) return nil;
+    if (!is_pack(d.bytes, d.length)) return [dev newLibraryWithURL:[NSURL fileURLWithPath:path] error:err];
+    DmSrcPack *p = [DmSrcPack new]; p->dev = dev; p->src = [NSMutableDictionary dictionary]; p->lib = [NSMutableDictionary dictionary]; p->path = path; p->lock = OS_UNFAIR_LOCK_INIT;
+    NSString *text = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!text) { if (err) *err = [NSError errorWithDomain:@"dm.srclib" code:2 userInfo:@{NSLocalizedDescriptionKey: @"an MSL source pack that is not UTF-8"}]; return nil; }
+    for (NSArray *part in pack_parts(text)) for (NSString *n in part[0]) p->src[n] = part[1];
+    SLOG("%s: MSL source pack of %lu entry points, compiled on first use", path.lastPathComponent.UTF8String, (unsigned long)p->src.count);
+    return p;
+}
+
+id<MTLFunction> dm_srclib_function(id lib, NSString *name) {
+    if (![lib isKindOfClass:DmSrcPack.class]) return [(id<MTLLibrary>)lib newFunctionWithName:name];
+    DmSrcPack *p = lib;
+    os_unfair_lock_lock(&p->lock); NSString *src = p->src[name]; id have = p->lib[src ?: @""]; os_unfair_lock_unlock(&p->lock);
+    if (!src) return nil;
+    if (!have) {   // a part compiles once (its entry points share the library); a part that does not is remembered as NSNull
+        NSError *e = nil; id<MTLLibrary> l = [p->dev newLibraryWithSource:src options:dm_srclib_options() error:&e];
+        if (!l) SLOG("[RED] %s: the part of %s does not compile: %s", p->path.lastPathComponent.UTF8String, name.UTF8String, [[e.localizedDescription componentsSeparatedByString:@"\n"].firstObject UTF8String]);
+        have = l ?: (id)NSNull.null;
+        os_unfair_lock_lock(&p->lock); p->lib[src] = have; os_unfair_lock_unlock(&p->lock);
+    }
+    return have == (id)NSNull.null ? nil : [(id<MTLLibrary>)have newFunctionWithName:name];
+}
+
 // ---- First start ----
 static _Atomic int g_running, g_done, g_total, g_failed;
 
@@ -81,7 +126,7 @@ void dm_srclib_prepare_start(const char *cdir) {
             if (![rel hasSuffix:@".metallib"]) continue;
             NSString *p = [dir stringByAppendingPathComponent:rel];
             int fd = open(p.fileSystemRepresentation, O_RDONLY); char m[4] = {0}; ssize_t got = fd >= 0 ? read(fd, m, 4) : -1; struct stat st = {0}; if (fd >= 0) { fstat(fd, &st); close(fd); }
-            if (got == 4 && dm_srclib_is_source(m, 4)) { [srcs addObject:rel]; [ident appendFormat:@"%@\t%lld\n", rel, (long long)st.st_size]; }
+            if (got == 4 && dm_srclib_is_source(m, 4)) { [srcs addObject:rel]; [ident appendFormat:@"%@\t%lld\n", rel, (long long)st.st_size]; }   // a source library or a source pack
         }
         if (!srcs.count) { atomic_store(&g_running, 0); return; }   // compiled metallibs (a Mac build): nothing to do
         // the marker: Library/Caches/dm_srclib/<hash of the set>.done, holding the sources that did not compile
@@ -103,10 +148,21 @@ void dm_srclib_prepare_start(const char *cdir) {
         dispatch_semaphore_t slots = dispatch_semaphore_create((long)MAX(cores, 2));   // compiles in flight: the compiler service runs them in parallel
         dispatch_group_t all = dispatch_group_create();
         NSMutableArray<NSString *> *bad = [NSMutableArray array]; NSLock *bl = [NSLock new];
-        for (NSString *rel in srcs) { @autoreleasepool {
-            dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER); dispatch_group_enter(all);
+        // the units to compile: each source library, and each part of a source pack (by its first entry point)
+        NSMutableArray<NSArray *> *units = [NSMutableArray array];
+        for (NSString *rel in srcs) {
             NSData *d = map_file([dir stringByAppendingPathComponent:rel]);
-            NSString *src = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
+            if (d && is_pack(d.bytes, d.length)) {
+                NSString *text = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+                for (NSArray *part in pack_parts(text ?: @"")) [units addObject:@[[NSString stringWithFormat:@"%@#%@", rel, [part[0] firstObject]], part[1]]];
+            } else [units addObject:@[rel, NSNull.null]];
+        }
+        atomic_store(&g_total, (int)units.count);
+        for (NSArray *unit in units) { @autoreleasepool {
+            NSString *rel = unit[0];
+            dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER); dispatch_group_enter(all);
+            NSData *d = unit[1] == NSNull.null ? map_file([dir stringByAppendingPathComponent:rel]) : nil;
+            NSString *src = unit[1] != NSNull.null ? unit[1] : d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
             void (^finish)(BOOL, NSString *) = ^(BOOL ok, NSString *why) {
                 if (!ok) { [bl lock]; [bad addObject:rel]; [bl unlock]; if (atomic_fetch_add(&g_failed, 1) < 20) SLOG("[RED] %s does not compile: %s", rel.UTF8String, why.UTF8String); }
                 atomic_fetch_add(&g_done, 1);

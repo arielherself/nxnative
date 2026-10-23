@@ -19,6 +19,7 @@
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
+#include "../nvn/mtl_srclib.h"   // MSL source packs: the library built without a Metal compiler (Linux)
 #include <CommonCrypto/CommonDigest.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
@@ -128,7 +129,7 @@ static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem
 typedef struct { char kind; uint8_t set, slot, count; uint16_t binding; } shres;   // count: an array of descriptors, elements in slots slot … slot + count − 1
 typedef struct { char key[17]; int frag, nres; shres res[24]; } shinfo;
 static shinfo *g_sh; static int g_nsh;
-static id<MTLLibrary> g_lib;
+static id g_lib;   // a metallib, or an MSL source pack (mtl_srclib.m): functions come through dm_srclib_function
 static int sh_cmp(const void *a, const void *b) { return memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); }
 static void sh_load(void) {
     const char *d = getenv("DM_MSL_DIR"); char p[1024];
@@ -154,7 +155,7 @@ static void sh_load(void) {
     qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);   // looked up by key (Super Mario Galaxy creates over 3,000 modules at boot)
     snprintf(p, sizeof p, "%s/vk/vk_shaders.metallib", d);
     NSError *err = nil;
-    g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];
+    g_lib = dm_srclib_open(g_dev, @(p), &err);
     if (!g_lib) LOG("[vk] [RED] shader library failed to load %s: %s", p, err.localizedDescription.UTF8String);
 }
 static const shinfo *sh_find(const char *key) { shinfo k; memcpy(k.key, key, 16); return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
@@ -799,7 +800,7 @@ VKB(vkCreateShaderModule, VkResult, VkDevice d, const VkShaderModuleCreateInfo *
     for (int i = 0; i < 8; i++) snprintf(m->key + 2 * i, 3, "%02x", h[i]);
     sh_capture(m->key, ci->pCode, ci->codeSize);
     m->si = sh_find(m->key);
-    @autoreleasepool { if (m->si && g_lib) m->fn = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s", m->key]]; }
+    @autoreleasepool { if (m->si && g_lib) m->fn = dm_srclib_function(g_lib, [NSString stringWithFormat:@"vk_%s", m->key]); }
     if (!m->fn) LOG("[vk] [RED] shader %s (%zu bytes of SPIR-V) is not in the library", m->key, ci->codeSize);
     else OLOG("CreateShaderModule %s", m->key);
     *out = m; return VK_SUCCESS;
@@ -852,7 +853,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             else if (st->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
                 if (dual && m->fn) {   // pipelines may be built on several threads
                     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mu);
-                    if (!m->tried_d) { m->tried_d = 1; m->fn_d = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_d", m->key]]; }
+                    if (!m->tried_d) { m->tried_d = 1; m->fn_d = dm_srclib_function(g_lib, [NSString stringWithFormat:@"vk_%s_d", m->key]); }
                     pthread_mutex_unlock(&mu);
                 }
                 pd.fragmentFunction = dual && m->fn_d ? m->fn_d : m->fn; p->fs = m->si;

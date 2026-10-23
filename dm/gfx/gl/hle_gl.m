@@ -17,6 +17,7 @@
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
 #import <Metal/Metal.h>
+#include "../nvn/mtl_srclib.h"   // MSL source packs: the library built without a Metal compiler (Linux)
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
 #include <mach-o/getsect.h>
@@ -118,7 +119,8 @@ static id<MTLSharedEvent> g_ev;                  // signalled with a command buf
 static id<MTLBuffer> g_attr0;                    // (0, 0, 0, 1): the value of a vertex input whose array is disabled (GL's default current attribute)
 static id<MTLTexture> g_tex0, g_cube0;           // bound where a sampler's unit has no texture (or an unusable one): opaque black, as GL samples an incomplete texture
 static id<MTLSamplerState> g_samp0;
-static id<MTLLibrary> g_lib, g_util;             // the game's shaders; the layer's own (clears)
+static id g_lib;                                 // the game's shaders: a metallib, or an MSL source pack (mtl_srclib.m, dm_srclib_function)
+static id<MTLLibrary> g_util;                    // the layer's own (clears)
 static uint64_t g_serial = 1;                    // serial of the command buffer being recorded (g_cb); committed ones have lower serials
 static _Atomic uint64_t g_done;                  // highest serial whose command buffer has completed
 static id<MTLCommandBuffer> g_cb;
@@ -167,7 +169,7 @@ static void sh_load(void) {
     qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);
     snprintf(p, sizeof p, "%s/gl/gl_shaders.metallib", d);
     NSError *err = nil;
-    g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];
+    g_lib = dm_srclib_open(g_dev, @(p), &err);
     if (!g_lib) GLOG("[RED] shader library failed to load %s: %s", p, err.localizedDescription.UTF8String);
 }
 static const shinfo *sh_find(const char *key, int frag) { shinfo k; memcpy(k.key, key, 16); k.frag = frag; return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
@@ -1289,7 +1291,7 @@ GLB(glCompileShader, void, GLuint sh) {
     sh_capture(s);
     int frag = s->type == GL_FRAGMENT_SHADER;
     s->si = sh_find(s->key, frag); s->compiled = 1;
-    @autoreleasepool { s->fn = s->si && g_lib ? [g_lib newFunctionWithName:[NSString stringWithFormat:@"gl_%s_%c", s->key, frag ? 'f' : 'v']] : nil; }
+    @autoreleasepool { s->fn = s->si && g_lib ? dm_srclib_function(g_lib, [NSString stringWithFormat:@"gl_%s_%c", s->key, frag ? 'f' : 'v']) : nil; }
     if (!s->fn) { static int n; if (n++ < 50) GLOG("[RED] %s shader %s (%zu bytes of GLSL) is not in the library (DM_GL_CAPTURE collects it)", s->type == GL_VERTEX_SHADER ? "vertex" : "fragment", s->key, s->len); }
     else OLOG("CompileShader %s", s->key);
 }

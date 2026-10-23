@@ -22,6 +22,7 @@
 #   p push constants)
 # Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import msl_pack
 
 MAGIC = 0x07230203
 OP_DECORATE, OP_MEMBER_DECORATE, OP_TYPE_ARRAY, OP_TYPE_RTARRAY, OP_TYPE_STRUCT = 71, 72, 28, 29, 30
@@ -140,6 +141,7 @@ def one(path, tmp, root):
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
+    if msl_pack.SOURCE: return msl_pack.write(msls, os.path.join(out, 'vk_shaders.metallib'))   # no Metal compiler here (Linux): an MSL source pack, compiled on the device (msl_pack.py)
     airs = []
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'
