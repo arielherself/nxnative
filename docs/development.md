@@ -77,6 +77,29 @@ The game language (`--language`, `LANGUAGE`; English by default) is what `nn::oe
 
 On the device, environment switches go in `Documents/env.txt` (one `KEY=VALUE` per line), and game files are also accepted at `Documents/romfs`.
 
+## Pack on Linux
+
+The script runs on Linux too (checked on x86-64, CachyOS): there it builds the same unsigned IPA without Xcode. What differs:
+
+- **Shaders as Metal source, compiled on the device.** No Metal compiler runs on Linux: upstream LLVM has no Metal front end or AIR target, Xcode 26's `metal` is a macOS shim for a toolchain Xcode downloads separately, and Apple's Windows tools need Wine and a developer login. Without `xcrun` (or with `DMSH_SOURCE_LIBS=1` on a Mac), `dm/ios/tools/ios_metal.py` `SOURCE` makes each `.metallib` file the shader's MSL itself (no `MTLB` magic): an *MSL source library*. Names, caches and the c1 / uniform extent tables (which read the MSL and the reflection) are as on a Mac. The Vulkan and GL layers' one library per game becomes an *MSL source pack* (`dm/gfx/tools/msl_pack.py`): every shader's MSL as a part of its own, headed by its entry points. On the device `dm/gfx/nvn/mtl_srclib.m` loads either kind with the offline compile's options (Metal 3.2, relaxed math, invariance preserved). At the app's first start, `main.m` compiles every source library and pack part in the background while the launcher is up, and the game starts when they are done ("Preparing shaders for this device (first start only)" with a count). A compiled library is not a file an app can keep, so the system's Metal shader cache, keyed by source and options, keeps them; a marker in `Library/Caches/dm_srclib/` (purged with that cache) remembers that the set was compiled and which sources do not compile. `log.txt` has `[srclib]` lines: the first start's count and time, and a source compiled at first use that the cache did not hold.
+- **The app without Xcode.** `build_ipa.sh` calls `dm/ios/tools/build_app_linux.py` instead of xcodegen and xcodebuild. It reads the target from `project.yml` and the host's sources, header paths, defines, frameworks and segment flags from `Gen/` (as Xcode does), and compiles them with clang as Xcode's Release configuration does. `Launcher.swift` goes through swiftc. It links with ld64.lld (signed ad hoc, as ld64 signs) against an iPhoneOS SDK: the Darwin Swift SDK [xtool](https://github.com/xtool-org/xtool) makes from Xcode (`xtool setup`, found through its `swift-sdk.json`), or `DM_IOS_SDK`. With compiler-rt's `libclang_rt.ios.a` from that SDK's Xcode (or, without one, its availability check alone). There is no asset catalog compiler, so the icon goes in as PNGs that `CFBundleIcons` names. Compiles are incremental (`<id>_build/ipa/build/ios/pkg/obj`, log `build.log` beside it). The standard shared font is the first broad TrueType font found (Droid Sans Fallback, Noto Sans, DejaVu Sans; `STD_FONT=` overrides it), and the button-icon font takes its letters from Noto Sans, DejaVu Sans or Liberation Sans Bold.
+- **The game's own decoders under emulation.** On a Mac, the Oodle of Unreal Engine games and of Trinity packs, and DRAGON QUEST XI S's LZ5, run in the Mac host. On Linux, `dm/tools/game_decoder.py` runs the same function of the extracted `main` under an ARM64 emulator (`dm/tools/arm64_emu.py`, Unicorn), and the script calls it where it would build the Mac host for them. It speaks the host's `DM_OODLE_JOB` / `DM_OODLE_SERVE` protocols. `arm64_emu.py selftest <main>` inflates a stream with a module's own zlib, as a check.
+- **Still a Mac's.** Steps that boot the whole game need a Mac with Apple silicon: the run-time shader captures (Fire Emblem: Three Houses' GLSLC outputs; Super Mario Galaxy and Super Mario Galaxy 2's SPIR-V) stop with that message, and a provisional profile's heap check is skipped, as on an Intel Mac. So is running a game on the computer, and `--prepare-xcode`.
+
+Setup (Arch / CachyOS shown; on Debian or Ubuntu the same packages via apt):
+
+```
+sudo pacman -S clang lld glslang zstd make python
+curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0     # .NET 10 into ~/.dotnet (the script looks there)
+nix profile install nixpkgs#spirv-cross                                      # or the distribution's spirv-cross
+# xtool (https://github.com/xtool-org/xtool) with Swift for Linux, then its Darwin SDK from an Xcode.xip you download from Apple:
+xtool setup
+python3 -m venv ~/nxnative-venv && ~/nxnative-venv/bin/pip install lz4 capstone fonttools pyyaml pillow unicorn
+~/nxnative-venv/bin/python scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys>
+```
+
+`dm/ios/tools/build_app_linux.py --check` says what it is missing. A Spyder or other GUI process may not inherit the shell's `PATH`. The script adds `~/.dotnet`, `~/.nix-profile/bin` and `~/.local/bin` (xtool's) to `TOOL_PATHS`, and sets `DOTNET_ROOT` for the programs .NET builds (a distribution may keep an older runtime in `/usr/share/dotnet`). On btrfs or XFS, `nx_extract` makes an update's unchanged files reflinks of the base game's, as it makes APFS clones on a Mac.
+
 ## Build and run on a device with Xcode
 
 With an Apple developer account, Xcode can sign and install the app itself:
@@ -151,7 +174,8 @@ Notes on these steps:
 - `dmsh_build.py` stops when a tool differs from `dm/gfx/tools/dmsh_chain.lock`. With another Xcode or spirv-cross, run `dm/gfx/tools/own_compilers.py` with the same arguments and environment instead: it builds with the local compilers, and only the translator must match.
 - `dmsh_build.py` compiles each shader's Metal source through a cache keyed by that source, the compile flags and the compiler (`dm/gfx/tools/dmsh_mtlcache.py`, in `<cache>/cas/metallib/`). A chain change that leaves a shader's MSL unchanged, such as a translator fix, costs that shader no Metal compile. Before building, the cache takes the libraries of the earlier `b-*/` folders beside its output (and beside `IOSOUT`), and of `DMSH_PREFILL=<Mac root>[=<iOS root>]` (several separated by `:`). It takes a folder only when its recorded flags are the current ones and a fresh compile of a few of its shaders reproduces their libraries byte for byte. The summary line `Metal cache:` shows reused, compiled and filled counts per target.
 - `build_ipa.sh` takes the rewritten modules from `$W/build/patched_<package>` and the RomFS from `$W/data/<package>/RomFS`; `PATCHED` and `ROMFS` override them. In unsigned IPA mode, `pack_ipa.py` packs the shader libraries, RomFS and add-on content beside the app Xcode built, as `DmIOS.app/msl/b-<chain version>`, `romfs` and `aoc`. Prepared Xcode projects instead sync these resources into the app before signing.
-- It also bundles a standard font (macOS's Arial Unicode, `STD_FONT=` overrides it) and the generated `nintendo_ext.ttf`.
+- It also bundles a standard font (macOS's Arial Unicode, on Linux the first broad TrueType font found; `STD_FONT=` overrides it) and the generated `nintendo_ext.ttf`.
+- Off a Mac, `build_ipa.sh` builds the app with `build_app_linux.py` (see [Pack on Linux](#pack-on-linux)); `FONT_PY` must name a Python with fontTools, PyYAML and Pillow. Steps 1 to 3 and 6 run there as written. The translator's dll runs through `dotnet` (`dmsh_chain.py xlate_cmd`; its launcher is a Mach-O binary), and the shader libraries come out as MSL source. Step 5 needs a Mac.
 - The icon is the `icon.jpg` that `nx_extract` saves next to `RomFS/`; `DM_ICON=` points at another image.
 - `DM_ENV_FILE=` bakes environment switches into the app, and `DM_DISPLAY_NAME=` renames it.
 - `DM_LANG=<code>` is the game language (`DMLanguage` in `Info.plist`, default `en-US`; `main.m` sets `DM_LANG` from it unless `Documents/env.txt` or the baked env file sets it).
@@ -611,6 +635,12 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 - **Host changes, all general:** the Mii database and the MiiModel stand-in; the add-on content cache sized as Horizon's RomFS working memory (its licence is decrypted in a 0x3130-byte heap); device save data as a save of its own for a game that mounts account save data too (every boot started a new save); SDK 4's DeviceSink layout and the audio renderer's update lock read off each SDK's `Update` (it was SDK 16's for every SDK before 20); and the zero cube for a one-layer 2D array in a cube slot ([03](agents/03-bringup.md), [04](agents/04-graphics.md)).
 - **Mac input:** the work folder's `run/ctl.sh` drives a run started with `DM_CTL`; `run/race.sh` boots from a copy of a save past the Mii pick into a 50cc Grand Prix (Mario, Mushroom Cup) with frame-timed keys and holds accelerate (`DM_KEYS=f960:L+R~0.3,f1260:A,f1500:A,f1740:A,f2000:A,f2240:A,f2400:A,f2560:A,f2800:A,f3040:A,f4300:A~70`). From a fresh save, L+R at the title opens "Select a Mii" (Right, A takes the first default Mii).
 
+**Little Nightmares II (`010097100EDD6000`), not brought up: packed from a provisional profile only (on Linux)**
+- **Engine:** Unreal Engine 4.25 (Tarsier), SDK 10.4.1, update 1.4 (v262144), Wwise; modules main, subsdk0 (the SDK's movie library) and sdk. Two DLC NSPs are licences with no content.
+- **Files:** one version 8 pak, `Helios/Content/Paks/Helios-Switch.pak` (4.9 GB, 43,523 files, none compressed; five empty compression method names in the footer). Its index is encrypted. The key is in no 32-byte window of `main`: the key callback (`main+0x18e96a0`, address-taken, no unwind entry) copies two 16-byte constants from two pages, which `uepak.py` `split_keys` finds.
+- **Shaders:** 20,170 inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, read as DRAGON QUEST XI S's (`ue_legacy`): 16,293 pixel, 3,195 vertex, 637 compute, 45 geometry. All translate.
+- **Not done:** the memory keys are the survey's guesses (Unreal's 62 GB region, FMalloc's 37 GB: see Octopath Traveler 0 for the allocator cut and the capped region an iPhone needs), with no heap check (it needs a Mac). Nothing has run.
+
 ## Tools (`dm/tools`)
 
 | Tool | What it does |
@@ -621,5 +651,7 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 | `insn_census.py` | Counts the instruction sites the rewriter must handle |
 | `nso_code.py` | Function ranges from `.eh_frame` and the data blocks in a text segment, which the rewriter and the census leave out |
 | `nso_syms.py` | Compares the SDK import surface of two games, or of one game (`-` for the reference) with the host hooks |
+| `arm64_emu.py` | Runs one function of an extracted NSO under an ARM64 emulator (Unicorn): relocations applied, imports and the module's own allocator answered in Python. `selftest <main>` inflates with the module's own zlib |
+| `game_decoder.py` | The game's own Oodle / LZ5 under `arm64_emu.py`, with the Mac host's `DM_OODLE_JOB` / `DM_OODLE_SERVE` protocols: what the NSP script runs off a Mac |
 | `nvn_slots_got.py` | Builds the NVN fetch table and call sites (GOT-indirect loaders) |
 | `loader_census.py` | Which of the functions a name loader fetches (glad's GL loader over `eglGetProcAddress`, NVN's C proc loader) the code really calls: the GOT slots the loader stores, loaded by other code |

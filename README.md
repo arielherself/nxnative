@@ -53,7 +53,7 @@ Needs iOS / iPadOS 26 or later on an iPhone 15 Pro or newer (A17 Pro chip or lat
 
 ## Pack an IPA
 
-**1. Get nxnative and its tools** (once, on a Mac with [Xcode](https://apps.apple.com/app/xcode/id497799835) and [Homebrew](https://brew.sh)):
+**1. Get nxnative and its tools** (once, on a Mac with [Xcode](https://apps.apple.com/app/xcode/id497799835) and [Homebrew](https://brew.sh), or on Linux, below):
 
 ```
 git clone https://github.com/seedds/nxnative.git && cd nxnative
@@ -61,6 +61,15 @@ brew install xcodegen zstd spirv-cross glslang
 brew install --cask dotnet-sdk
 python3 -m pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
 ```
+
+**On Linux** instead (checked on x86-64; no Xcode needed): install clang, lld, glslang, zstd and make from your distribution, the .NET 10 SDK, spirv-cross, and [xtool](https://github.com/xtool-org/xtool) with its Darwin SDK (`xtool setup`, which takes an `Xcode.xip` you download from Apple), then the Python packages in a venv:
+
+```
+curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0
+python3 -m venv ~/nxnative-venv && ~/nxnative-venv/bin/pip install lz4 capstone fonttools pyyaml pillow unicorn
+```
+
+and run the script below with `~/nxnative-venv/bin/python`. Linux has no Metal compiler, so such an IPA carries the shaders as Metal source: the iPhone compiles them at the app's first start (a count shows on screen, then the game starts) and keeps them in its shader cache. Three games need a Mac with Apple silicon to pack, because the script boots them there once to capture shaders they make at run time: Fire Emblem: Three Houses, Super Mario Galaxy and Super Mario Galaxy 2 ([details](docs/development.md#pack-on-linux)).
 
 **2. Put one game's NSPs in a folder**: the base game (an NSP, or an XCI cartridge dump), plus its update and DLC if you have them:
 
@@ -108,7 +117,7 @@ A connected game controller hides the touch controls and keeps every button.
 
 ## For developers
 
-How it works, the script's options, running games on the Mac, adding a game, and per-game notes: [docs/development.md](docs/development.md). In-depth bring-up and debugging notes: [docs/agents](docs/agents/README.md).
+How it works, the script's options, packing on Linux, running games on the Mac, adding a game, and per-game notes: [docs/development.md](docs/development.md). In-depth bring-up and debugging notes: [docs/agents](docs/agents/README.md).
 
 ## License
 

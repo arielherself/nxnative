@@ -1276,7 +1276,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None):
     if n == 0: raise BuildError(f'no iOS shader libraries in {libs}')
     say(f'{n} iOS shader libraries ({libs})')
     t = log.read_text(errors='replace')
-    if own := re.search(r'^note: (built with this Mac\'s compilers.*)$', t, re.M): say(own.group(1))
+    if own := re.search(r'^note: (built with this (?:Mac|machine)\'s compilers.*)$', t, re.M): say(own.group(1))
     m, c = re.search(r'shaders (\d+): ok (\d+)', t), re.search(r'shader cache: hit (\d+)', t)
     note = ''
     if m:

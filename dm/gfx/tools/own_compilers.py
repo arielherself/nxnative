@@ -15,7 +15,7 @@ strict = dmsh_chain.check_tools
 def check_tools():
     bad, own = [], []
     for b in strict(): (own if OWN.fullmatch(b) else bad).append(b)
-    if own and not bad: print('note: built with this Mac\'s compilers, not the ones the shaders were tested with (dmsh_chain.lock): ' +
+    if own and not bad: print('note: built with this machine\'s compilers, not the ones the shaders were tested with (dmsh_chain.lock): ' +
                   '; '.join(f'{m[1]} {m[3]} (tested: {m[2]})' for m in map(OWN.fullmatch, own)), flush=True)
     return bad
 
