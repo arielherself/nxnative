@@ -14,6 +14,7 @@ void dm_gamepad_reset(void);
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+int dm_srclib_prepare_running(int *done, int *total, int *failed);   // dm/gfx/nvn/mtl_srclib.m: the first start's compile of MSL source libraries
 
 static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
@@ -45,6 +46,7 @@ static UILabel *front_ios_fps_label(void);
 @property (nonatomic, strong) UIView *pad;
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
+@property (nonatomic, strong) UILabel *prep;
 - (void)startGame;
 @end
 static DmRootVC *g_root;
@@ -64,8 +66,27 @@ static void launcher_done(void) { [g_root startGame]; }
     front_ios_audio_watch();
 }
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
+// The first start of an app whose shaders are Metal source (built on Linux) compiles them all before the game starts (mtl_srclib.m; it began at launch): a count on screen until then.
+// YES while it runs; startGame is called again when it ends
+- (BOOL)waitForShaders {
+    int done = 0, total = 0, failed = 0;
+    if (!dm_srclib_prepare_running(&done, &total, &failed)) { [self.prep removeFromSuperview]; self.prep = nil; return NO; }
+    if (!self.prep) {
+        self.prep = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
+        self.prep.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.prep.numberOfLines = 0; self.prep.textAlignment = NSTextAlignmentCenter; self.prep.textColor = UIColor.whiteColor;
+        self.prep.font = [UIFont monospacedDigitSystemFontOfSize:17 weight:UIFontWeightRegular];
+        [self.view addSubview:self.prep];
+        LOG("front end: waiting for the first start's shader compile");
+    }
+    self.prep.text = total ? [NSString stringWithFormat:@"Preparing shaders for this device (first start only)\n%d / %d%@", done, total, failed ? [NSString stringWithFormat:@"\n%d could not be compiled", failed] : @""]
+                           : @"Preparing shaders for this device (first start only)";
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self startGame]; });
+    return YES;
+}
 - (void)startGame {
     if (self.game) return;
+    if ([self waitForShaders]) return;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0);   // Metal reads it when a device is made: before the game view makes its own (an env file's DM_METAL_HUD sets it in main.m already)
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];

@@ -9,6 +9,7 @@
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 void dm_host_preload_start(int argc, char **argv);
+void dm_srclib_prepare_start(const char *dir);   // dm/gfx/nvn/mtl_srclib.m
 UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
 
@@ -64,6 +65,7 @@ static int boot_env(void) {
     NSString *dm = [res stringByAppendingPathComponent:@"dm"];
     setenv("DM_NVN_SHMAP", [dm stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", [res stringByAppendingPathComponent:@"msl"].fileSystemRepresentation, 0);
+    dm_srclib_prepare_start(getenv("DM_MSL_DIR"));   // shader libraries built without a Metal compiler (Linux) are Metal source: the first start compiles them all, in the background while the launcher is up (front_ios.m waits for it)
     setenv("DM_FONT_DIR", [dm stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
     NSString *aoc = [res stringByAppendingPathComponent:@"aoc"];   // add-on content: build_ipa.sh puts the RomFS extracted from the player's DLC NSPs at <App>/aoc/<index>/
     if ([fm fileExistsAtPath:aoc]) setenv("DM_AOC_DIR", aoc.fileSystemRepresentation, 0);
