@@ -807,12 +807,13 @@ for a in sorted(kinds):
 
 def scratch_dead(off):
     """x9–x17 carry nothing at off: from off on, every one of them is written before it is read, up to a bl (a call clobbers them all; DRAGON QUEST VII Reimagined's gate sits on the
-    mov x0, x19 before one). Only straight-line code is followed: a branch, a blr or a ret before the bl answers no"""
+    mov x0, x19 before one) or a ret (AAPCS64 returns nothing in them: they are the caller's temporaries; Little Nightmares II's gate sits on the mov x0, x19 before one). Only straight-line
+    code is followed: a branch or a blr before either answers no"""
     written = set()
     for a in range(off, min(off + 4 * 16, TEXT_END), 4):
         ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
-        if ins.mnemonic == 'bl': return True
-        if ins.mnemonic in ('b', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.'): return False
+        if ins.mnemonic in ('bl', 'ret'): return True
+        if ins.mnemonic in ('b', 'br', 'blr', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.'): return False
         rd, wr = regset(ins)
         if any(9 <= (num(r) or -1) <= 17 and num(r) not in written for r in rd): return False
         written |= {num(r) for r in wr}

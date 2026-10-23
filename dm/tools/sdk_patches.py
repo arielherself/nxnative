@@ -108,6 +108,15 @@ CUTS = {
     (0x32c500, 'e9230b32', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
     (0x32c66c, 'ea030232', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
   ],
+  # Little Nightmares II 1.4 (v262144) sdk (SDK 10.4.1, the same build as The Great Ace Attorney Chronicles', which has no virtual address memory and never allocates an address region): the node area
+  # cut and regions of 1 GB and more aligned to 32 MB, as DRAGON QUEST XI S's SDK 7.3.2 build, whose code these match. Unreal Engine 4.25's nninitStartup takes one region for the whole engine
+  # (62 GB unless -SwitchVirtualAddressSpaceSize= caps it: the profile's game_args). The AddressRegionManager constructor is at sdk+0x340e90 (the limit at +0x28 from orr w8,wzr,#0x3fe00000,
+  # the occupied length from orr w9); VammManager::AllocateAddressRegion's placement (sdk+0x341030) aligns 1 GB and more to 1 GB at +0x34109c
+  'd9add76fc264863d85fbbd1d70076c76': [
+    (0x340ea0, 'e8230b32', '087ca052', 'AddressRegionManager constructor: node area limit orr w8,wzr,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x340f3c, 'e9230b32', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x34109c, 'ea030232', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
+  ],
   # Octopath Traveler 0 1.0.5 (v327680) sdk (SDK 19.3.13): the AddressRegionManager node area 0x3fe00000 → 0x3e00000 (62 MB), as Engage's SDK 12 (above). The same constructor (sdk+0x1423ec): +0x1423fc
   # sets the node area limit, +0x142468 registers it as an occupied region. Unreal's region (-SwitchVirtualAddressSpaceSize, the profile's game_args) then starts 62 MB into the alias region, and the guest
   # block stays small enough for an iPhone next to the Unreal heap (hle_uemalloc.c), which lives outside it

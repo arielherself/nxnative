@@ -10,6 +10,11 @@
 // 16 DumpAllocatorStats, 17 IsInternallyThreadSafe, 18 ValidateHeap, 19 GetDescriptiveName, 20 OnMallocInitialized (main+0x5e4c0e8: TryMalloc / TryRealloc call +0x18 / +0x28, GCreateMalloc
 // calls +0x88 and +0xa0; Free is main+0x10, which reads the pool base as GetAllocationSize does). Its allocator object is made at run time (GCreateMalloc mallocs it), so the host puts the
 // vtable in at an observation gate right after the cut constructor call (OBS in the game's patches.py, OBS_UE_MALLOC: x19 = the object)
+// Unreal Engine 4.25 (Little Nightmares II) has neither TryMalloc nor TryRealloc: 0-1 destructors, 2 Exec, 3 Malloc, 4 Realloc, 5 Free, 6 QuantizeSize, 7 GetAllocationSize, 8 Trim,
+// 9 SetupTLSCachesOnCurrentThread, 10 ClearAndDisableTLSCachesOnCurrentThread, 11 InitializeStatsMetadata, 12 UpdateStats, 13 GetAllocatorStats, 14 DumpAllocatorStats,
+// 15 IsInternallyThreadSafe, 16 ValidateHeap, 17 GetDescriptiveName (the vtable main+0x63496d0 has 18 relocated slots; 17 returns L"Binned3", 3 takes the small-bin path up to 128 KB and
+// alignment 16, 5 maps the pointer to one of 37 pools of 1 GB, 7 returns true with the size). Its object is made at run time as DRAGON QUEST VII Reimagined's (FPlatformMemory::BaseAllocator
+// main+0x1d10760 mallocs 0x1c38 bytes and constructs them), so the same gate puts the vtable in
 // Unreal Engine 5.6 (FINAL FANTASY RESONANCE) adds MallocZeroed / TryMallocZeroed after Free and two TLS cache calls after the setup, and two cached-memory queries at the end: 0-1 destructors,
 // 2-5 FExec, 6 Malloc, 7 TryMalloc, 8 Realloc, 9 TryRealloc, 10 Free, 11 MallocZeroed, 12 TryMallocZeroed, 13 QuantizeSize, 14 GetAllocationSize, 15 Trim, 16 SetupTLSCachesOnCurrentThread,
 // 17 MarkTLSCachesAsUsedOnCurrentThread, 18 MarkTLSCachesAsUnusedOnCurrentThread, 19 ClearAndDisableTLSCachesOnCurrentThread, 20 InitializeStatsMetadata, 21 UpdateStats, 22 GetAllocatorStats,
@@ -22,11 +27,12 @@
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
-enum { UE5, UE4_27, UE5_6 };
-static const struct { int nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; } k_lay[] = {
+enum { UE5, UE4_27, UE5_6, UE4_25 };
+static const struct { int nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; } k_lay[] = {   // try_malloc / try_realloc -1: no such slot
     [UE5] = { 26, 6, 7, 8, 9, 10, 11, 12, { 13, 14, 15, 19 } },      // Trim, the TLS cache setup and teardown, DumpAllocatorStats
     [UE4_27] = { 21, 3, 4, 5, 6, 7, 8, 9, { 10, 11, 12, 16 } },
     [UE5_6] = { 32, 6, 7, 8, 9, 10, 13, 14, { 15, 16, 17, 18, 19, 23 } },   // Trim, the four TLS cache calls, DumpAllocatorStats
+    [UE4_25] = { 18, 3, -1, 4, -1, 5, 6, 7, { 8, 9, 10, 14 } },
 };
 static const struct { const char *build, *what; int layout; uint64_t obj, vtable, cut; } k_ue[] = {
     // Octopath Traveler 0 1.0.5: the FMallocBinned3 object (main+0x68022c8, bss), its vtable (main+0x5b06f38, 26 slots), the cut constructor call (main+0x12e40, a nop after the rewrite)
@@ -35,6 +41,8 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
     { "f7ec03e4cb9de3bd8319d4e899d2e9cc", "DRAGON QUEST VII Reimagined 1.2.0", UE4_27, 0, 0x5e4c0e8, 0x32758dc },
     // FINAL FANTASY RESONANCE 1.0.1: the FMallocBinned3 object (main+0x77c6210, bss), its vtable (main+0x67df800, 32 slots), the cut constructor call (main+0x137f0)
     { "84e182f72ee1da4f477804bd05b54c15", "FINAL FANTASY RESONANCE 1.0.1", UE5_6, 0x77c6210, 0x67df800, 0x137f0 },
+    // Little Nightmares II 1.4: no fixed object (made by FPlatformMemory::BaseAllocator, given at the gate), its vtable (main+0x63496d0, 18 slots), the cut constructor call (main+0x1d10778)
+    { "7f4216b6e784a4b2f880f5bfa581608d", "Little Nightmares II 1.4", UE4_25, 0, 0x63496d0, 0x1d10778 },
 };
 enum { NSLOT = 32 };
 
@@ -95,8 +103,9 @@ void dm_ue_malloc_install(void) {
             if (*(uint32_t *)(b + k_ue[k].cut) != 0xd503201f) { LOG("[RED] %s: main is rewritten without the allocator cut (its patches.py): Unreal's own FMallocBinned3 runs", k_ue[k].what); return; }
             if (!k_ue[k].obj && !gate_obs_present(OBS_UE_MALLOC)) { LOG("[RED] %s: main is rewritten without the allocator gate (OBS of its patches.py): the allocator would have no vtable", k_ue[k].what); return; }
             memcpy(g_vt, b + k_ue[k].vtable, sizeof g_vt[0] * k_lay[L].nslot);   // the relocated vtable: the trivial slots stay the guest's
-            g_vt[k_lay[L].malloc_] = (void *)m_Malloc; g_vt[k_lay[L].try_malloc] = (void *)m_TryMalloc; g_vt[k_lay[L].realloc_] = (void *)m_Realloc;
-            g_vt[k_lay[L].try_realloc] = (void *)m_TryRealloc; g_vt[k_lay[L].free_] = (void *)m_Free;
+            g_vt[k_lay[L].malloc_] = (void *)m_Malloc; g_vt[k_lay[L].realloc_] = (void *)m_Realloc; g_vt[k_lay[L].free_] = (void *)m_Free;
+            if (k_lay[L].try_malloc >= 0) g_vt[k_lay[L].try_malloc] = (void *)m_TryMalloc;
+            if (k_lay[L].try_realloc >= 0) g_vt[k_lay[L].try_realloc] = (void *)m_TryRealloc;
             g_vt[k_lay[L].quantize] = (void *)m_QuantizeSize; g_vt[k_lay[L].get_size] = (void *)m_GetAllocationSize;
             for (int s = 0; s < 6 && k_lay[L].nothing[s]; s++) g_vt[k_lay[L].nothing[s]] = (void *)m_Nothing;
             g_zone = malloc_create_zone(0, 0); malloc_set_zone_name(g_zone, "guest Unreal heap"); g_what = k_ue[k].what;
