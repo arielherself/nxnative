@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Generate a stand-in for the "Nintendo extension" shared font (nintendo_ext.ttf): controller-button icons at the original private-use code points (A/B/X/Y, L/R/ZL/ZR/SL/SR, +/−, D-pad, stick direction arrows).
-# The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold, knocked out of a solid plate.
+# The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold (elsewhere a bold sans the system has), knocked out of a solid plate.
 # Usage: make_ext_font.py out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools)
-import math, sys
+import math, os, sys
 from fontTools.ttLib import TTFont
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
@@ -128,4 +128,9 @@ def build(out, letter_font):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2: sys.exit(__doc__ or 'usage: make_ext_font.py out.ttf [letter-font.ttf]')
-    build(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf')
+    # the letters: macOS's Arial Rounded Bold, elsewhere (Linux) a bold sans TrueType font the distribution ships
+    LETTERS = ['/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf'] + [f'/usr/share/fonts/{d}/{n}' for n in ('NotoSans-Bold.ttf', 'DejaVuSans-Bold.ttf', 'LiberationSans-Bold.ttf')
+                                                                            for d in ('noto', 'TTF', 'truetype/noto', 'truetype/dejavu', 'truetype/liberation', 'dejavu', 'liberation')]
+    font = sys.argv[2] if len(sys.argv) > 2 else next((f for f in LETTERS if os.path.isfile(f)), None)
+    if not font: sys.exit('[RED] make_ext_font.py: no letter font (Arial Rounded Bold on a Mac; Noto Sans, DejaVu Sans or Liberation Sans Bold elsewhere): give one as the second argument')
+    build(sys.argv[1], font)

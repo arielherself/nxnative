@@ -863,6 +863,15 @@ def build_mac_host(repo, out, env, logs, g):
     return out
 
 
+def game_decoder(repo, work, env, logs, g, patched):
+    """The split's DM_OODLE_HOST / DM_OODLE_MODULES: the game's own decoder (Oodle, LZ5) in the Mac host built for the profile. Without a Mac with Apple silicon none: the split reads what
+    is not compressed (Little Nightmares II's pak stores every file) and stops at the first file that needs the decoder"""
+    if not apple_silicon():
+        say('no game decoder for the shader split: it runs the game\'s own code in the Mac host, which needs a Mac with Apple silicon; files that need it stop the split')
+        return {}
+    return {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}
+
+
 def boot_mac(host, patched, henv, rd, log, secs, done=lambda: False):
     """Boot the game in the Mac host (headless and silent: no DM_WINDOW, no DM_AUDIO) with its output in log, until done() says so, the host exits, or secs pass;
     then SIGTERM (the host's graceful exit), a kill 5 s later. Returns the host's exit code, None when it was still running"""
@@ -1437,7 +1446,7 @@ def main(args=None):
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     if not MAC and shutil.which('dotnet', path=env['PATH']):   # Linux: the apphosts dotnet builds (nx_extract) look for the runtime in DOTNET_ROOT, else in /usr/share/dotnet, which may hold an older one
-        env.setdefault('DOTNET_ROOT', str(Path(shutil.which('dotnet', path=env['PATH'])).resolve().parent))
+        os.environ['DOTNET_ROOT'] = env['DOTNET_ROOT'] = env.get('DOTNET_ROOT') or str(Path(shutil.which('dotnet', path=env['PATH'])).resolve().parent)   # os.environ too: nx_extract runs without env (cli restores it)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
     app, fam = scan_nsps(nsp_dir)
@@ -1578,7 +1587,7 @@ def main(args=None):
         ios = build_gl_shaders(py, repo, [game / 'RomFS', game / 'ExeFS/main'], sh, env, logs, g, reuse=not (provisional or derived or ALLOW_DAMAGED))
     else:
         # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
-        oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
+        oodle = (lambda: game_decoder(repo, work, env, logs, g, patched)) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
         own = bool(provisional or derived)   # the shader tables come from this build's split (the profile's are checked otherwise)
         pkey = split_shaders(py, repo, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey)

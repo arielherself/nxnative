@@ -38,10 +38,11 @@ PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
 JOB_MAGIC, OUT_MAGIC = 0x4a4f4d44, 0x524f4d44   # "DMOJ", "DMOR" (hle_oodle.c)
 FREQ = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'ps', 4: 'gs', 5: 'cs'}   # EShaderFrequency (the archive's frequency census: 0 vertex, 3 pixel, 5 compute)
 
-_cc = None
+_cc = _ssl = None
 def aes_decrypt(key, data):
-    """AES-256 ECB decryption through CommonCrypto (every Mac has it; no Python package needed)"""
+    """AES-256 ECB decryption through CommonCrypto (every Mac has it; no Python package needed), elsewhere through OpenSSL's libcrypto (Linux)"""
     global _cc
+    if sys.platform != 'darwin': return _aes_decrypt_ssl(key, data)
     if _cc is None:
         _cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
         _cc.restype = ctypes.c_int32
@@ -49,6 +50,23 @@ def aes_decrypt(key, data):
     out = ctypes.create_string_buffer(len(data)); moved = ctypes.c_size_t()
     if _cc(1, 0, 2, key, len(key), None, data, len(data), out, len(data), ctypes.byref(moved)): raise ValueError('CCCrypt failed')   # decrypt, AES, ECB
     return out.raw[:moved.value]
+
+def _aes_decrypt_ssl(key, data):
+    global _ssl
+    if _ssl is None:
+        from ctypes.util import find_library
+        _ssl = ctypes.CDLL(find_library('crypto') or 'libcrypto.so.3')
+        _ssl.EVP_CIPHER_CTX_new.restype = _ssl.EVP_aes_256_ecb.restype = ctypes.c_void_p
+        _ssl.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
+        _ssl.EVP_DecryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+        _ssl.EVP_CIPHER_CTX_set_padding.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        _ssl.EVP_DecryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_char_p, ctypes.c_int]
+    ctx = _ssl.EVP_CIPHER_CTX_new(); out = ctypes.create_string_buffer(len(data) + 32); n = ctypes.c_int()
+    try:
+        if not (_ssl.EVP_DecryptInit_ex(ctx, _ssl.EVP_aes_256_ecb(), None, key, None) and _ssl.EVP_CIPHER_CTX_set_padding(ctx, 0)
+                and _ssl.EVP_DecryptUpdate(ctx, out, ctypes.byref(n), data, len(data))): raise ValueError('EVP_DecryptUpdate failed')
+    finally: _ssl.EVP_CIPHER_CTX_free(ctx)
+    return out.raw[:n.value]
 
 _M, _K0, _K1, _K2 = (1 << 64) - 1, 0xc3a5c85c97cb3127, 0xb492b66fbe98f273, 0x9ae16a3b2f90404f
 def _rot(v, s): return ((v >> s) | (v << (64 - s))) & _M if s else v
@@ -145,13 +163,13 @@ class R:
         if n < 0: return self.raw(-2 * n).decode('utf-16-le')[:-1]
         return self.raw(n)[:-1].decode('utf-8', 'replace') if n else ''
 
-LEGACY = (4,)   # legacy pak versions read (the per-file index); 11 has the encoded one
+LEGACY = (4, 5, 6, 7, 8)   # legacy pak versions read (the per-file index); 11 has the encoded one. 8 (UE 4.22 to 4.25: Little Nightmares II) names its compression methods in the footer
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
 
 def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
     Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
-    for back in (0x2c, 0xc8, 0xcc):
+    for back in (0x2c, 0xac, 0xc8, 0xcc):   # 0xac / 0xcc: version 8 with four (UE 4.22) or five (4.23 to 4.25) method names
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
         if m == PAK_MAGIC: return back, ver
     raise ValueError('no pak footer')
@@ -162,8 +180,9 @@ def pak_version(f):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version)"""
     back, ver = magic_back(f)
-    if ver in LEGACY:
-        f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
+    if ver in LEGACY:   # the encrypted index flag right before the magic; from version 8 the method names (32 bytes each) follow the SHA-1, and an entry's method is an index into them
+        f.seek(-(back + 1), 2); ft = f.read(back + 1); ioff, isz = struct.unpack_from('<QQ', ft, 9)
+        if ver >= 8: return ft[0], ioff, isz, [ft[45 + 32 * i:77 + 32 * i].rstrip(b'\0').decode('latin1') or f'method {i + 1}' for i in range((back - 0x2c) // 32)], ver
         return ft[0], ioff, isz, [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)], ver
     if ver != 11: raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
     f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
@@ -172,15 +191,47 @@ def footer(f):
     return ft[k - 1], ioff, isz, methods, ver
 
 def find_key(img, lo, hi, pak):
-    """The AES key among main's 32-byte windows (read-only and data segments, 4-aligned, at least 20 distinct bytes): the one that decrypts the index start to a short mount point"""
+    """The AES key among main's 32-byte windows (read-only and data segments, 4-aligned, at least 20 distinct bytes): the one that decrypts the index start to a short mount point.
+    Else among the keys main's code copies out of two 16-byte constants (split_keys: Little Nightmares II)"""
     with open(pak, 'rb') as f:
         _, ioff, _, _, _ = footer(f); f.seek(ioff); blk = f.read(16)
+    def ok(w): d = aes_decrypt(w, blk); return 0 < struct.unpack_from('<i', d)[0] < 512 and d[4:7] == b'../'
     for a in range(lo, hi - 32, 4):
         w = img[a:a + 32]
-        if len(set(w)) < 20: continue
-        d = aes_decrypt(w, blk)
-        if 0 < struct.unpack_from('<i', d)[0] < 512 and d[4:7] == b'../': return w
-    return None
+        if len(set(w)) >= 20 and ok(w): return w
+    return next((w for w in split_keys(img, lo, hi) if ok(w)), None)
+
+_KEYS = {}
+def pak_key(pak, mains):
+    """The AES key of a pak whose index is encrypted, from the first of the main modules that holds it (find_key; kept in memory only); None when the index is not encrypted"""
+    with open(pak, 'rb') as f: enc = footer(f)[0]
+    if not enc: return None
+    for m in mains:
+        if (pak, m) not in _KEYS:
+            img, lo, hi = nso_image(m); _KEYS[(pak, m)] = find_key(img, lo, hi, pak)
+        if _KEYS[(pak, m)]: return _KEYS[(pak, m)]
+    raise ValueError(f'{pak}: its index is encrypted, and none of the main modules ({", ".join(mains)}) holds a key that decrypts it')
+
+def split_keys(img, lo, hi):
+    """32-byte keys a function writes as two 16-byte constants that are not side by side: ldr qA / ldr qB, each from an adrp page, then stp qA, qB, [x0] (Little Nightmares II, Unreal
+    Engine 4.25: the key callback main+0x18e96a0 is just that, its halves on two pages). Yields each candidate"""
+    words = struct.unpack_from(f'<{lo // 4}I', img)
+    for pc, w in enumerate(words):
+        if (w & 0xFFFF83E0) != 0xAD000000: continue   # stp qA, qB, [x0] (signed offset 0)
+        want, got = {w & 31: None, (w >> 10) & 31: None}, {}
+        for k in range(pc - 1, max(pc - 12, -1), -1):   # the two loads, each from a page an adrp set
+            l = words[k]
+            if (l & 0xFFC00000) != 0x3DC00000 or (l & 31) not in want or (l & 31) in got: continue   # ldr q, [xn, #imm]
+            rn = (l >> 5) & 31
+            for j in range(k - 1, max(k - 12, -1), -1):
+                a = words[j]
+                if (a & 0x9F00001F) == 0x90000000 | rn:   # adrp xn
+                    imm = ((a >> 29) & 3) | (((a >> 5) & 0x7FFFF) << 2)
+                    if imm & (1 << 20): imm -= 1 << 21
+                    at = ((j * 4) & ~0xFFF) + (imm << 12) + ((l >> 10) & 0xFFF) * 16
+                    if lo <= at <= hi - 16: got[l & 31] = img[at:at + 16]
+                    break
+        if len(got) == 2: yield got[w & 31] + got[(w >> 10) & 31]
 
 class Pak:
     def __init__(self, path, key=None):

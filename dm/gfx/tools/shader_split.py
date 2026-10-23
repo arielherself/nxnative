@@ -709,30 +709,32 @@ def trinity_shaders(path, rel, packs, out):
                 scan_blob(data, f'/{rel}#{name}#{struct.unpack_from("<Q", d, hs[0] + 8 * k)[0]:016x}', out)
 
 UE_LEGACY = 'UE legacy pak'
+UE_MAINS = []   # the main modules given (main): an encrypted pak index takes its AES key from one (uepak.pak_key)
 def ue_legacy_jobs(files, parts=64):
     """Legacy Unreal paks (version 4, DRAGON QUEST XI S: pakchunk0-Switch.pak and pakchunk1-Switch.pak, 13.8 GB, and the update's *_0_P.pak): the engine mounts them all as one view, and a patch pak
-    (name ending in _P.pak) wins over the others for the same path. Only the newest copy of each path is scanned. → ([(pak path, rel, (UE_LEGACY, names)), …] in about equal raw sizes, the pak paths taken)"""
+    (name ending in _P.pak) wins over the others for the same path. Only the newest copy of each path is scanned. Little Nightmares II's one pak (version 8, UE 4.25) has an encrypted index and stores
+    every file. → ([(pak path, rel, (UE_LEGACY, names, key)), …] in about equal raw sizes, the pak paths taken); the key (None for an index in the clear) goes to the workers in memory only"""
     def legacy(p):
         try:
             with open(p, 'rb') as f: return uepak.pak_version(f) in uepak.LEGACY
         except (OSError, ValueError, struct.error): return False
     paks = [(p, r) for p, r in files if p.endswith('.pak') and legacy(p)]
     if not paks: return [], set()
-    view = {}
+    view, keys = {}, {}
     for p, r in sorted(paks, key=lambda x: (x[1].endswith('_P.pak'), x[1])):   # patch paks last, so they replace; one view per pak folder (one per version given)
-        pk = uepak.Pak(p)
+        pk = uepak.Pak(p, keys.setdefault(p, uepak.pak_key(p, UE_MAINS)))
         for name, e in pk.files.items(): view[(os.path.dirname(p), os.path.normpath(pk.mount + name))] = (p, r, name, e['raw'])
     jobs, cur, size, step = [], collections.defaultdict(list), 0, sum(v[3] for v in view.values()) / parts
     for p, r, name, raw in sorted(view.values(), key=lambda x: (x[1], x[2])):
         cur[(p, r)].append(name); size += raw
-        if size >= step: jobs += [(p_, r_, (UE_LEGACY, tuple(ns))) for (p_, r_), ns in cur.items()]; cur, size = collections.defaultdict(list), 0
-    jobs += [(p_, r_, (UE_LEGACY, tuple(ns))) for (p_, r_), ns in cur.items()]
+        if size >= step: jobs += [(p_, r_, (UE_LEGACY, tuple(ns), keys[p_])) for (p_, r_), ns in cur.items()]; cur, size = collections.defaultdict(list), 0
+    jobs += [(p_, r_, (UE_LEGACY, tuple(ns), keys[p_])) for (p_, r_), ns in cur.items()]
     return jobs, {p for p, _ in paks}
 
 _PAKS = {}
-def ue_legacy_shaders(path, rel, names, out):
+def ue_legacy_shaders(path, rel, names, out, key=None):
     """Files of a legacy Unreal pak (ue_legacy_jobs), each decoded block by block with the game's own decoder (DRAGON QUEST XI S: LZ5) and scanned for the shader records the engine keeps inline"""
-    pk = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path))
+    pk = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path, key))
     for name in names:
         d = pk.read(name, decode=oodle)
         ue_inline_shaders(d, f'/{rel}#{re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))}', out)
@@ -986,7 +988,7 @@ def scan_file(args):
         trinity_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
-        ue_legacy_shaders(path, rel, args[2][1], found)
+        ue_legacy_shaders(path, rel, args[2][1], found, args[2][2])
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == KPKA:   # entries of an RE Engine PAK (kpka_jobs)
         kpka_shaders(path, rel, args[2], found)
@@ -1040,6 +1042,7 @@ def nso_image(path):
 
 def main():
     romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
+    UE_MAINS[:] = main_l.split(',')
     pairsout = sys.argv[6] if len(sys.argv) > 6 else None
     # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
