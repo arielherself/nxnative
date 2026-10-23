@@ -157,7 +157,13 @@ static class P {
         return "";
     }
 
-    // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
+    // A copy-on-write clone: clonefile on macOS (APFS); elsewhere File.Copy, which .NET makes a reflink (FICLONE) on Linux file systems that have them (btrfs, XFS)
+    static void Clone(string src, string dst) {
+        if (!OperatingSystem.IsMacOS()) { File.Copy(src, dst); return; }
+        if (clonefile(src, dst, 0) != 0) throw new IOException($"clonefile {src} → {dst} failed: errno {Marshal.GetLastWin32Error()}");
+    }
+
+    // Copy out file by file; files identical to the same path in the compare dir become copy-on-write clones instead (APFS clones, Linux reflinks)
     static void Copy(IFileSystem fs, string dst, string cmpDir) {
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
@@ -169,7 +175,7 @@ static class P {
             string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
             if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
                 if (File.Exists(op)) File.Delete(op);
-                if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");
+                Clone(cp, op);
                 cloned++; continue;
             }
             try { Write(f.Get, op, e.Size, buf); }

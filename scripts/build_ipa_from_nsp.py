@@ -50,7 +50,9 @@ HEAP_CHECK_NNMAIN_SECS = 5
 
 PROGRESS = 'auto'                       # stage lines on the console: 'bar' (one line per stage, redrawn in place), 'lines' (a plain line every BEAT seconds), 'off' (only each stage's start and end); 'auto' = bar in a terminal or Spyder, lines when the output goes to a file; 'json' = one JSON event per line, for a program that shows the build
 BEAT = 30                               # seconds between progress lines in 'lines' mode
-TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]   # GUI apps such as Spyder do not get the shell's PATH
+TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet'),   # GUI apps such as Spyder do not get the shell's PATH
+              os.path.expanduser('~/.nix-profile/bin'), '/nix/var/nix/profiles/default/bin', os.path.expanduser('~/.local/bin')]   # Linux: .NET from dotnet-install.sh in ~/.dotnet, spirv-cross from nix, xtool in ~/.local/bin
+MAC = sys.platform == 'darwin'   # elsewhere (Linux) the IPA is built without Xcode (dm/ios/tools/build_app_linux.py) and the shaders ship as MSL source libraries, compiled on the device (dm/ios/tools/ios_metal.py SOURCE)
 
 
 class BuildError(Exception):
@@ -436,11 +438,15 @@ def pick_nsps(fam, have, versions):
     return out
 
 
-def can_clone(d):   # whether this volume supports APFS clones (nx_extract uses them to save space; without them it writes full copies)
+def can_clone(d):   # whether this volume supports copy-on-write clones: APFS clones, Linux reflinks (btrfs, XFS); nx_extract uses them to save space, without them it writes full copies
     a, b = d / '.clone_test', d / '.clone_test2'
     try:
         a.write_bytes(b'x'); rmtree(b)
-        return ctypes.CDLL(None, use_errno=True).clonefile(str(a).encode(), str(b).encode(), 0) == 0
+        if MAC: return ctypes.CDLL(None, use_errno=True).clonefile(str(a).encode(), str(b).encode(), 0) == 0
+        import fcntl
+        with open(a, 'rb') as src, open(b, 'wb') as dst:
+            try: fcntl.ioctl(dst.fileno(), 0x40049409, src.fileno()); return True   # FICLONE
+            except OSError: return False
     finally:
         rmtree(a); rmtree(b)
 
@@ -693,6 +699,16 @@ def profile_files(g):   # every file of the game profile (game.tsv and its table
 def check_prereqs(env, xlate):
     missing = [m for m in ('lz4.block', 'capstone', 'fontTools') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])   # zstd: built in from Python 3.14
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 capstone fonttools backports.zstd; backports.zstd only before Python 3.14)')
+    if not MAC:   # Linux: no Xcode; the app is built by build_app_linux.py (clang, ld64.lld, swiftc, xtool's iPhoneOS SDK) and the shaders ship as MSL source, compiled on the device
+        if not _importable('yaml'): raise BuildError(f'the current Python ({sys.executable}) is missing modules: yaml (pip install pyyaml: the app build reads dm/ios/project.yml)')
+        tools = {'dotnet': '.NET SDK 10 (dotnet-install.sh --channel 10.0)', 'spirv-cross': 'the distribution\'s spirv-cross, or nix profile install nixpkgs#spirv-cross', 'make': 'make'}
+        gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
+        r = subprocess.run([sys.executable, xlate.parents[4] / 'dm/ios/tools/build_app_linux.py', '--check'], capture_output=True, text=True, env=env)
+        gone += [l.removeprefix('missing: ') for l in r.stdout.splitlines() if l.startswith('missing: ')]
+        if gone: raise BuildError('tools not found: ' + '; '.join(gone))
+        if not _importable('PIL'): say('[RED] no Pillow in this Python (pip install pillow): the app gets no icon')
+        if not xlate.with_suffix('.dll').exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}.dll')
+        return
     tools = {'xcodebuild': 'Xcode', 'xcodegen': 'brew install xcodegen', 'dotnet': '.NET SDK 10', 'zstd': 'brew install zstd', 'spirv-cross': 'brew install spirv-cross', 'make': 'Xcode'}
     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
     if gone: raise BuildError('tools not found: ' + ', '.join(gone))
@@ -827,14 +843,15 @@ def glslc_done(d):   # capture files written whole: a GLSLC output (magic 0x1986
     return out
 
 
-def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python under Rosetta too); an Intel Mac has no such key
-    return subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
+def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python under Rosetta too); an Intel Mac has no such key; not a Mac at all (Linux): False
+    return MAC and subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
 
 
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
-    if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
+    if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and '
+                                             + ('this Mac has an Intel processor' if MAC else f'this is {sys.platform}'))
     host = repo / 'dm/host'
     run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a'], logs / 'mac_host_make.log', env=env, cwd=host)
     dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
@@ -1195,7 +1212,8 @@ class ShaderWatch:
 
     def __call__(self):
         if not self.w:   # dmsh_build.py's temporary folder: the dmsh_* under WORK made since it started
-            self.w = max((d for d in self.tmp.glob('dmsh_*') if d.stat().st_birthtime >= self.t0 - 2), key=lambda d: d.stat().st_birthtime, default=None)
+            born = lambda d: getattr(d.stat(), 'st_birthtime', d.stat().st_ctime)   # Linux has no birth time in os.stat: a new folder's ctime is its creation
+            self.w = max((d for d in self.tmp.glob('dmsh_*') if born(d) >= self.t0 - 2), key=born, default=None)
         try: ext = collections.Counter(os.path.splitext(x)[1] for x in os.listdir(self.w)) if self.w else collections.Counter()
         except OSError: ext = collections.Counter()
         if self.t1 is None:
@@ -1309,7 +1327,7 @@ class IpaWatch:
         s = re.sub(r'^\[[\d:]+\] ', '', line)
         with self.lock:   # a poll sees a step change whole
             if s.startswith('generate Gen/'): self.state = 'gen'; PROG.set(step='generating sources')
-            elif s.startswith('xcodebuild'):
+            elif s.startswith(('xcodebuild', 'app build')):   # app build: build_app_linux.py, off a Mac
                 units = len(os.listdir(self.ios / 'Gen/src')) + 2 + sum(1 for p in (self.ios / 'Sources').iterdir() if p.suffix in ('.c', '.m'))   # + Gen/main/main.c and Gen/embed.S
                 self.state, self.t = 'xcode', time.time(); PROG.set(step='xcodebuild', done=0, total=units, unit='files', est=True)   # an incremental build compiles fewer
             elif s.startswith('pack IPA'):
@@ -1403,6 +1421,7 @@ def main(args=None):
     repo = find_repo(here)
     prepare_xcode = args.prepare_xcode or PREPARE_XCODE
     keep = KEEP_EXTRACTED if args.keep_extracted is None else args.keep_extracted
+    if prepare_xcode and not MAC: raise BuildError('--prepare-xcode makes an Xcode project, which needs a Mac; without it the script packs an IPA (on Linux too)')
     if prepare_xcode and not keep: raise BuildError('--prepare-xcode requires --keep-extracted: Xcode builds from the extracted files')
     if args.xcode_workspace and not prepare_xcode: raise BuildError('--xcode-workspace requires --prepare-xcode')
     nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
@@ -1417,6 +1436,8 @@ def main(args=None):
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+    if not MAC and shutil.which('dotnet', path=env['PATH']):   # Linux: the apphosts dotnet builds (nx_extract) look for the runtime in DOTNET_ROOT, else in /usr/share/dotnet, which may hold an older one
+        env.setdefault('DOTNET_ROOT', str(Path(shutil.which('dotnet', path=env['PATH'])).resolve().parent))
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
     app, fam = scan_nsps(nsp_dir)

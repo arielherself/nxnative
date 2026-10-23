@@ -60,6 +60,7 @@ class XcodePipelineTests(unittest.TestCase):
             }.items():
                 mocks[name] = stack.enter_context(patch.object(build, name, return_value=value))
             stack.enter_context(patch.dict(os.environ))  # derived profiles change the tool search environment
+            stack.enter_context(patch.object(build, 'MAC', True))  # the Xcode flow, also when the tests run on Linux (where --prepare-xcode stops)
             stack.enter_context(patch.object(game, 'by_title', return_value=registered))
             stack.enter_context(patch.object(game, 'load', return_value=profile))
             stack.enter_context(patch.object(profile_guess, 'build_sources', return_value=sources))
