@@ -4030,7 +4030,7 @@ static MTLBlendOperation bop(int e) { switch (e) { case 2: return MTLBlendOperat
 static const uint8_t *g_pso_lmap; static id<MTLFunction> g_pso_fsfn; static pso_fz_desc g_pso_fz, g_fz_desc;
 static os_unfair_lock g_fz_fn_lock = OS_UNFAIR_LOCK_INIT;
 static NSMutableDictionary<NSString *, id<MTLFunction>> *g_bf_fn_cache;
-static NSMutableDictionary<NSString *, id<MTLLibrary>> *g_bf_lib_cache;
+static NSMutableDictionary<NSString *, id> *g_bf_lib_cache;   // readable-tile libraries by shader; NSNull: it does not load
 static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
 static nvn_hmap g_pso_fail = {.klen = sizeof(pso_key)};   // pipelines that failed to build: remembered and never retried (previously every draw recompiled it, over 10,000 times in one iPhone session)
 static const char g_tf_mark;
@@ -5819,14 +5819,14 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     os_unfair_lock_lock(&g_fz_fn_lock);
     if (!g_bf_fn_cache) { g_bf_fn_cache = [NSMutableDictionary dictionary]; g_bf_lib_cache = [NSMutableDictionary dictionary]; }
     size_t kl = strlen(fs->key); NSString *base = [NSString stringWithFormat:@"%.*s", (int)(kl > 2 ? kl - 2 : kl), fs->key];
-    id<MTLLibrary> lib = g_bf_lib_cache[base];
-    if (!lib) {
+    id lib = g_bf_lib_cache[base];
+    if (!lib) {   // a library that does not load is remembered (NSNull): an MSL source library that does not compile on the device (built without a Metal compiler) would be compiled and reported again at every pass that could merge
         NSError *e = nil; NSString *path = [NSString stringWithFormat:@"%@/%@_bf.metallib", g_msl_dir, base];
         lib = lib_from_file(path, &e);
-        if (!lib) MLOG("[RED] failed to load the readable-tile version %s: %s", path.UTF8String, e.localizedDescription.UTF8String);
-        else g_bf_lib_cache[base] = lib;
+        if (!lib) MLOG("[RED] failed to load the readable-tile version %s: %s (its passes are not merged)", path.UTF8String, e.localizedDescription.UTF8String);
+        g_bf_lib_cache[base] = lib ?: (id)NSNull.null;
     }
-    if (!lib) { os_unfair_lock_unlock(&g_fz_fn_lock); return nil; }
+    if (lib == (id)NSNull.null) { os_unfair_lock_unlock(&g_fz_fn_lock); return nil; }
     NSMutableString *k = [NSMutableString stringWithFormat:@"%02x", fbmask];
     for (int i = 0; i < fs->rf.nfc; i++) [k appendFormat:@",%d", fx[i]];
     for (int j = 0; j < 8; j++) [k appendFormat:@"/%02x", lmap[j]];
