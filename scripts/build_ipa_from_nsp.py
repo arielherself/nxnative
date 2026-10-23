@@ -863,13 +863,22 @@ def build_mac_host(repo, out, env, logs, g):
     return out
 
 
-def game_decoder(repo, work, env, logs, g, patched):
-    """The split's DM_OODLE_HOST / DM_OODLE_MODULES: the game's own decoder (Oodle, LZ5) in the Mac host built for the profile. Without a Mac with Apple silicon none: the split reads what
-    is not compressed (Little Nightmares II's pak stores every file) and stops at the first file that needs the decoder"""
-    if not apple_silicon():
-        say('no game decoder for the shader split: it runs the game\'s own code in the Mac host, which needs a Mac with Apple silicon; files that need it stop the split')
-        return {}
-    return {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}
+def decoder_host(repo, work, env, logs, g, main_nso):
+    """What runs the game's own decoder (Oodle, LZ5) for the shader tools, called as the Mac host is ([it, rewritten modules] with DM_OODLE_JOB or DM_OODLE_SERVE): the Mac host built for
+    the profile on a Mac with Apple silicon, which runs the game's code natively; elsewhere (Linux) a launcher of dm/tools/game_decoder.py, which runs the same decoder of the extracted
+    main (main_nso) under an ARM64 emulator (Unicorn)"""
+    if apple_silicon(): return build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
+    if not _importable('unicorn'): raise BuildError(f'the game\'s own decoder runs under an ARM64 emulator off a Mac, and the current Python ({sys.executable}) has no Unicorn (pip install unicorn)')
+    out = work / 'tools/game_decoder'; out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text('#!/bin/sh\n# written by scripts/build_ipa_from_nsp.py: the game\'s own decoder under an ARM64 emulator (dm/tools/game_decoder.py), called as the Mac host is\n'
+                   f'exec {shlex.quote(sys.executable)} {shlex.quote(str(repo / "dm/tools/game_decoder.py"))} --nso {shlex.quote(str(main_nso))} "$@"\n')
+    out.chmod(0o755)
+    return out
+
+
+def game_decoder(repo, work, env, logs, g, patched, main_nso):
+    """The split's DM_OODLE_HOST / DM_OODLE_MODULES: the game's own decoder (decoder_host)"""
+    return {'DM_OODLE_HOST': str(decoder_host(repo, work, env, logs, g, main_nso)), 'DM_OODLE_MODULES': str(patched)}
 
 
 def boot_mac(host, patched, henv, rd, log, secs, done=lambda: False):
@@ -959,8 +968,8 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         dec = None
         if uepak.io_shader_tocs(str(d / 'RomFS')):
             if not host:
-                PROG.set(step='building the Mac host')
-                host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
+                PROG.set(step='building the Mac host' if apple_silicon() else 'the game\'s decoder, emulated')
+                host = decoder_host(repo, work, env, logs, g, dirs[pkg_ver] / 'ExeFS/main')
             dec = uepak.OodleHost(host, patched, env)
         PROG.set(step=f'{v}: shader archives out of the paks' + (' and IoStore containers' if dec else ''))
         try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
@@ -971,11 +980,11 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
             + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
         if n:   # Oodle-compressed shaders (Octopath Traveler 0); LZ4 ones (Unreal Engine 4.26 and later by default) are decoded by uepak.py already
             if not host:
-                PROG.set(step='building the Mac host')
-                host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-            PROG.set(step=f'{v}: decoding {n:,} shaders in the Mac host')
+                PROG.set(step='building the Mac host' if apple_silicon() else 'the game\'s decoder, emulated')
+                host = decoder_host(repo, work, env, logs, g, dirs[pkg_ver] / 'ExeFS/main')
+            PROG.set(step=f'{v}: decoding {n:,} shaders ' + ('in the Mac host' if apple_silicon() else 'with the game\'s decoder under emulation'))
             henv = dict(env, DM_ROMFS=str(dirs[pkg_ver] / 'RomFS'), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_OODLE_JOB=str(jd / 'oodle.job'))
-            rc = boot_mac(host, patched, henv, rd, log, UE_DECODE_SECS)
+            rc = boot_mac(host, patched, henv, rd, log, UE_DECODE_SECS if apple_silicon() else 6 * UE_DECODE_SECS)   # emulated: no boot, but each record runs tens of times slower
             if rc != 0 or not (jd / 'oodle.job.out').exists():
                 PROG.end(ok=False)
                 PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=20)).rstrip('\n'))
@@ -1587,7 +1596,7 @@ def main(args=None):
         ios = build_gl_shaders(py, repo, [game / 'RomFS', game / 'ExeFS/main'], sh, env, logs, g, reuse=not (provisional or derived or ALLOW_DAMAGED))
     else:
         # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
-        oodle = (lambda: game_decoder(repo, work, env, logs, g, patched)) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
+        oodle = (lambda: game_decoder(repo, work, env, logs, g, patched, game / 'ExeFS/main')) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
         own = bool(provisional or derived)   # the shader tables come from this build's split (the profile's are checked otherwise)
         pkey = split_shaders(py, repo, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey)
