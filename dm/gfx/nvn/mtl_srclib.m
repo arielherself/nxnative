@@ -119,18 +119,23 @@ void dm_srclib_prepare_start(const char *cdir) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool {
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         NSFileManager *fm = NSFileManager.defaultManager;
-        // the source libraries and what identifies this set of them: their paths and sizes
-        NSMutableArray<NSString *> *srcs = [NSMutableArray array]; NSMutableSet<NSString *> *packs = [NSMutableSet set]; NSMutableString *ident = [NSMutableString stringWithString:@"dm_srclib 1\n"];
+        // the source libraries
+        NSMutableArray<NSString *> *srcs = [NSMutableArray array]; NSMutableSet<NSString *> *packs = [NSMutableSet set]; NSMutableDictionary<NSString *, NSNumber *> *sizes = [NSMutableDictionary dictionary];
         NSDirectoryEnumerator *en = [fm enumeratorAtPath:dir];
         for (NSString *rel in en) {
             if (![rel hasSuffix:@".metallib"]) continue;
             NSString *p = [dir stringByAppendingPathComponent:rel];
             int fd = open(p.fileSystemRepresentation, O_RDONLY); char m[sizeof PACK_MAGIC] = {0}; ssize_t got = fd >= 0 ? read(fd, m, sizeof m - 1) : -1; struct stat st = {0}; if (fd >= 0) { fstat(fd, &st); close(fd); }
             if (got < 4 || !dm_srclib_is_source(m, (size_t)got)) continue;   // a metallib
-            [srcs addObject:rel]; [ident appendFormat:@"%@\t%lld\n", rel, (long long)st.st_size];   // a source library, or a source pack
+            [srcs addObject:rel]; sizes[rel] = @(st.st_size);   // a source library, or a source pack
             if (is_pack(m, (size_t)got)) [packs addObject:rel];
         }
         if (!srcs.count) { atomic_store(&g_running, 0); return; }   // compiled metallibs (a Mac build): nothing to do
+        // what identifies this set: the sorted paths and sizes (the enumeration order of a folder of 42,000 files differs between launches: Little Nightmares II's second start
+        // found no marker and compiled them all again)
+        [srcs sortUsingSelector:@selector(compare:)];
+        NSMutableString *ident = [NSMutableString stringWithString:@"dm_srclib 1\n"];
+        for (NSString *rel in srcs) [ident appendFormat:@"%@\t%lld\n", rel, sizes[rel].longLongValue];
         // the marker: Library/Caches/dm_srclib/<hash of the set>.done, holding the sources that did not compile
         NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
         uint64_t h = 1469598103934665603ull; for (const char *c = ident.UTF8String; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
