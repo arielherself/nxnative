@@ -1294,7 +1294,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); mtl_init
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[110];
+static int g_red_once[111];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -1314,7 +1314,6 @@ static const pfv_pair g_pfv_srgb[] = {
 };
 static int tex_need_pfv(MTLPixelFormat base, MTLPixelFormat view) {
     if (base == view) return 0;
-    if (base == MTLPixelFormatDepth32Float_Stencil8 && view == MTLPixelFormatX32_Stencil8) return 0;   // the stencil-only view needs no format-view usage (upgrading recreated the depth buffer in use)
     for (size_t i = 0; i < sizeof g_pfv_srgb / sizeof *g_pfv_srgb; i++)
         if ((base == g_pfv_srgb[i].a && view == g_pfv_srgb[i].b) || (base == g_pfv_srgb[i].b && view == g_pfv_srgb[i].a)) return 0;
     return 1;
@@ -1432,16 +1431,45 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen; const void *span; int sparse, vbase; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen; const void *span; int sparse, vbase; uint8_t *edge[2]; uint32_t edge_n[2]; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
+// edge: the uploaded bytes of the storage's first and last host pages where other data shares them (pkg_edges_take)
 @implementation NvPkg
-- (void)dealloc { res_remove(tex); if (spare) res_remove(spare); }
+- (void)dealloc { res_remove(tex); if (spare) res_remove(spare); free(edge[0]); free(edge[1]); }
 @end
-static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_miss;
+static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_miss, g_pkg_edge_skips;
 static uint64_t g_pfv_upgrades;
 // DM_NVN_DIRTYCHECK=1 (diagnostic, compared against ground truth): fully hash the pool content on every use; changed but not detected by dirty-page tracking = a missed detection
 static int dirtycheck(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_DIRTYCHECK") != NULL; return v; }
 static uint64_t full_hash(const uint8_t *m, uint64_t n) { uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < n; i++) h = (h ^ m[i]) * 1099511628211ull; return h; }
+// Writes beside a texture. The tracker marks whole host pages (16 KB) dirty, and guest memory pools are only 4 KB aligned: the first and last pages of a texture's storage are shared with
+// whatever lies beside it. Pokémon Sword keeps each texture of its GFPAK models in a pool of its own, with the pool's object 4 KB before the storage, in the same host page, and writes there
+// every frame: 73,232 re-uploads in 70 s of play from a save, every one checked of unchanged content, 12 GB of upload staging in 8 minutes. So the bytes of the storage in those edge pages
+// are kept at the upload (pkg_edges_take), and a texture whose only written pages are its edges, with those bytes unchanged, is protected again instead of re-uploaded (pkg_edges_clean).
+// The edges are the whole storage when it lies within two pages (no page wholly inside)
+static void pkg_edge_ranges(const tex_t *t, uintptr_t r[2][2], uintptr_t *ia, uintptr_t *ie) {
+    uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)t->mem, e = a + t->L.size;
+    *ia = (a + pg - 1) & ~(pg - 1); *ie = e & ~(pg - 1);
+    if (*ie <= *ia) { r[0][0] = a; r[0][1] = e; r[1][0] = r[1][1] = 0; *ia = *ie = 0; return; }
+    r[0][0] = a; r[0][1] = *ia; r[1][0] = *ie; r[1][1] = e;
+}
+static void pkg_edges_take(NvPkg *pk, const tex_t *t) {   // right after an upload, with its stamp in pk->stamp
+    for (int i = 0; i < 2; i++) { free(pk->edge[i]); pk->edge[i] = NULL; pk->edge_n[i] = 0; }
+    if (pk->sparse || !pk->span || !t->mem) return;
+    uintptr_t r[2][2], ia, ie; pkg_edge_ranges(t, r, &ia, &ie);
+    for (int i = 0; i < 2; i++) if (r[i][1] > r[i][0]) { pk->edge_n[i] = (uint32_t)(r[i][1] - r[i][0]); pk->edge[i] = malloc(pk->edge_n[i]); memcpy(pk->edge[i], (const void *)r[i][0], pk->edge_n[i]); }
+    // A write after the upload's stamp may have reached the copy but not the upload: then there is no copy to trust, and the next write re-uploads as before
+    if (nvn_dirty_since_span(pk->span, t->mem, t->L.size, pk->stamp)) for (int i = 0; i < 2; i++) { free(pk->edge[i]); pk->edge[i] = NULL; pk->edge_n[i] = 0; }
+}
+static int pkg_edges_clean(NvPkg *pk, const tex_t *t) {   // the covered pages were written since the upload: 1 = only edge pages, and the texture's bytes there are as uploaded
+    if (!pk->edge_n[0] && !pk->edge_n[1]) return 0;
+    uintptr_t r[2][2], ia, ie; pkg_edge_ranges(t, r, &ia, &ie);
+    nvn_dirty_protect(t->mem, t->L.size); uint64_t st = nvn_dirty_now();   // protect, take the stamp, then read (as pkg_upload): a later write is seen at the next check
+    if (ie > ia && nvn_dirty_since_span(pk->span, (const void *)ia, ie - ia, pk->stamp)) return 0;
+    for (int i = 0; i < 2; i++) if (pk->edge_n[i] && memcmp(pk->edge[i], (const void *)r[i][0], pk->edge_n[i])) return 0;
+    pk->stamp = st; g_pkg_edge_skips++;
+    return 1;
+}
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
@@ -1472,6 +1500,11 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     d.storageMode = MTLStorageModePrivate;   // Render targets and assets both go in GPU private storage (lossless compression available)
     d.usage = MTLTextureUsageShaderRead | (fmt_compressed(t->d.format) || packaged ? 0 : MTLTextureUsageRenderTarget)
             | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0);   // Image usage: shader-writable (compute kernels generating the 3D color lookup table, etc.
+    // A depth-stencil texture has the format-view usage from the start: its stencil is read through an X32_Stencil8 view (stencil-mode views and textures, the depth-stencil copy), which Metal's
+    // contract allows only with that usage. Apple GPUs read the view correctly without it, but the API validation layer aborts the process at the first such view (PR #106, found on Luigi's
+    // Mansion 3), and upgrading later would recreate a depth buffer in use. Unlike colour formats it costs nothing measured: on an M4 Pro a 2560x1440 one has the same allocated size and the same
+    // GPU time over eight load / store passes with and without it
+    if (d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) d.usage |= MTLTextureUsagePixelFormatView;
     return d;
 }
 // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
@@ -1998,6 +2031,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                     MLOG("[RED] dirty-page miss: texture ser=%llu pool content changed but was not detected", t->serial);
                 return pk->view ? pk->view : pk->tex;
             }
+            if (!pk->sparse && pkg_edges_clean(pk, t)) return pk->view ? pk->view : pk->tex;   // only the pages it shares with other data were written
             // Pool content changed (streamed assets written into the same storage, a movie frame): switch to another texture, as in-flight draws still read the old one. That is the spare
             // when the GPU is done with it (see NvPkg), else a new one; the old one becomes the spare (pkg_upload_ made nt resident)
             id<MTLTexture> reuse = nil;
@@ -2007,7 +2041,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
-                pk->spare = old; pk->spare_fence = g_fence + 1; g_ser_gen++; pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = nvn_dirty_now(); g_pkg_reuploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size); }
+                pk->spare = old; pk->spare_fence = g_fence + 1; g_ser_gen++; pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = nvn_dirty_now(); g_pkg_reuploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size); pkg_edges_take(pk, t); }
             return pk->view ? pk->view : pk->tex;
         }
         pk = [NvPkg new];
@@ -2016,6 +2050,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (!pk->tex) return nil;
         pk->span = nvn_dirty_span(t->mem, t->L.size);
         pk->seen = nvn_dirty_now(); g_pkg_uploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size);
+        pkg_edges_take(pk, t);
         if (pk->sparse) sparse_view(pk, t);
         zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "upload");
         tex_put(t->serial, pk);
@@ -2107,6 +2142,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         MLOG("GPU allocation growth by op: op%d %llu MB, op%d %llu MB, op%d %llu MB, op%d %llu MB", top[0], g_ap_bytes[top[0]] >> 20, top[1], g_ap_bytes[top[1]] >> 20, top[2], g_ap_bytes[top[2]] >> 20, top[3], g_ap_bytes[top[3]] >> 20); }
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
+uint64_t mtl_pkg_edge_skips(void) { return g_pkg_edge_skips; }
 uint64_t mtl_pkg_miss(void) { return g_pkg_miss; }
 void mtl_vc_drop(uint64_t ser);
 void mtl_tex_release(tex_t *t) {
@@ -2849,7 +2885,7 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, fn_u, geo_fn;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc)
+@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, fn_u, fn_m, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     id<MTLComputePipelineState> geo_pso;
@@ -3035,10 +3071,13 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         if (!o->tf_fn) MLOG("[RED] shader %s: no transform feedback entry point %s in its library", pc.UTF8String, [j[@"entry_tf"] UTF8String]);
     }
     if (stage == 1 && j[@"entry_u"]) { o->fn_u = [lib newFunctionWithName:j[@"entry_u"]]; if (!o->fn_u) MLOG("[RED] shader %s: no integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_u"] UTF8String]); }
+    if (stage == 1 && j[@"entry_m"]) { o->fn_m = [lib newFunctionWithName:j[@"entry_m"]]; o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
+        if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
     if (o->fn.functionConstantsDictionary.count) {
         NSError *fe = nil; id<MTLFunction> f = [lib newFunctionWithName:entry constantValues:[MTLFunctionConstantValues new] error:&fe];
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
         if (o->fn_u) { f = [lib newFunctionWithName:j[@"entry_u"] constantValues:[MTLFunctionConstantValues new] error:&fe]; o->fn_u = f; }
+        if (o->fn_m) { f = [lib newFunctionWithName:j[@"entry_m"] constantValues:[MTLFunctionConstantValues new] error:&fe]; o->fn_m = f; }
     }
     if (o->rf.nb) {
         o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
@@ -3412,6 +3451,15 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         NSUInteger ns = base.textureType == MTLTextureType3D ? 1 : (r.v.set_layers && r.v.nlayers ? r.v.nlayers : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1) - s0);
         MTLTextureType tt = r.v.set_target ? ttype(r.v.target, base.textureType) : base.textureType;
         if (tt == MTLTextureType2D && ns > 1) ns = 1;
+        // A cube view whose layer range is not whole cubes of faces counts its layers in cubes, as the hardware's texture header does for cube maps (Pokémon Sword's environment maps:
+        // 6-layer 2D array textures sampled through views with target CUBEMAP and layers 0 + 1, as the outdoors loads). Metal counts faces, and its validation aborts on a cube view of 1 slice
+        if ((tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray) && ns % 6) {
+            NSUInteger total = base.textureType == MTLTextureType3D ? 1 : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+            int fits = (s0 + ns) * 6 <= total;
+            static int noted; if (fits && !noted++) MLOG("[nvn-mtl] cube texture view of %u + %u layers (texture ID %d, %lu faces): counted in cubes, as the hardware does", (unsigned)s0, (unsigned)ns, tid, (unsigned long)total);
+            if (!fits) RED_ONCE(110, "cube texture view of %u + %u layers past the %lu faces of texture ID %d: read as a 2D array", (unsigned)s0, (unsigned)ns, (unsigned long)total, tid);
+            if (fits) { s0 *= 6; ns *= 6; } else tt = MTLTextureType2DArray;
+        }
         vc_key k; memset(&k, 0, sizeof k); k.pf = pf; k.tt = (uint8_t)tt; k.l0 = (uint32_t)l0; k.nl = (uint32_t)nl; k.s0 = (uint32_t)s0; k.ns = (uint32_t)ns; memcpy(k.sw, sw, 4);
         if (!(v = vc_get(rp->t.serial, &k, base))) {
             v = need_sw ? [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns) swizzle:MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])]
@@ -4066,6 +4114,33 @@ static MTLBlendFactor bfac(int f) {
         case 0x61: return MTLBlendFactorBlendColor; case 0x62: return MTLBlendFactorOneMinusBlendColor; case 0x63: return MTLBlendFactorBlendAlpha; case 0x64: return MTLBlendFactorOneMinusBlendAlpha; }
     return MTLBlendFactorOne;
 }
+// An advanced blend mode (blend_st.adv, hle_nvn.c) replaces the blend functions. The Porter-Duff modes with uncorrelated overlap are sums of the source and destination weighted by
+// 1, 0, As, Ad and their complements (NV_blend_equation_advanced, with premultiplied colours), which the fixed-function factors give exactly; the result goes through the ADD equation.
+// A source that is not premultiplied is multiplied by As first, which only a source factor of ONE can take (SRC_ALPHA). The other modes (multiply, screen, overlay, HSL, ...) need
+// the destination colour in the shader and keep the state's own functions, with a red line
+static blend_st adv_blend(blend_st b) {
+    if (!b.adv) return b;
+    enum { Z = NVN_BLEND_FUNC_ZERO, O = NVN_BLEND_FUNC_ONE, SA = NVN_BLEND_FUNC_SRC_ALPHA, ISA = NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA, DA = NVN_BLEND_FUNC_DST_ALPHA, IDA = NVN_BLEND_FUNC_ONE_MINUS_DST_ALPHA };
+    // {source factor, destination factor} for colour, then for alpha
+    static const uint8_t pd[][4] = {
+        [NVN_BLEND_ADVANCED_MODE_ZERO] = {Z, Z, Z, Z},        [NVN_BLEND_ADVANCED_MODE_SRC] = {O, Z, O, Z},           [NVN_BLEND_ADVANCED_MODE_DST] = {Z, O, Z, O},
+        [NVN_BLEND_ADVANCED_MODE_SRC_OVER] = {O, ISA, O, ISA}, [NVN_BLEND_ADVANCED_MODE_DST_OVER] = {IDA, O, IDA, O},
+        [NVN_BLEND_ADVANCED_MODE_SRC_IN] = {DA, Z, DA, Z},     [NVN_BLEND_ADVANCED_MODE_DST_IN] = {Z, SA, Z, SA},
+        [NVN_BLEND_ADVANCED_MODE_SRC_OUT] = {IDA, Z, IDA, Z},  [NVN_BLEND_ADVANCED_MODE_DST_OUT] = {Z, ISA, Z, ISA},
+        [NVN_BLEND_ADVANCED_MODE_SRC_ATOP] = {DA, ISA, Z, O},  [NVN_BLEND_ADVANCED_MODE_DST_ATOP] = {IDA, SA, O, Z},
+        [NVN_BLEND_ADVANCED_MODE_XOR] = {IDA, ISA, IDA, ISA},  [NVN_BLEND_ADVANCED_MODE_PLUS] = {O, O, O, O},
+        [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED] = {O, O, O, O}, [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED_ALPHA] = {O, O, O, O},
+    };
+    const uint8_t *f = b.adv < sizeof pd / sizeof *pd && pd[b.adv][0] ? pd[b.adv] : NULL;
+    if (!f || b.adv_ovl || (b.adv_npm && f[0] != O && f[0] != Z)) {
+        static uint64_t seen; if (!(seen >> (b.adv & 63) & 1)) { seen |= 1ull << (b.adv & 63);
+            LOG("[RED] advanced blend mode %#x (overlap %d, %spremultiplied source) has no fixed-function equivalent: the state's blend functions are used", (unsigned)b.adv, (int)b.adv_ovl, b.adv_npm ? "not " : ""); }
+        return b;
+    }
+    b.src_rgb = b.adv_npm && f[0] == O ? SA : f[0]; b.dst_rgb = f[1]; b.src_a = f[2]; b.dst_a = f[3];
+    b.eq_rgb = b.eq_a = NVN_BLEND_EQUATION_ADD;
+    return b;
+}
 static MTLBlendOperation bop(int e) { switch (e) { case 2: return MTLBlendOperationSubtract; case 3: return MTLBlendOperationReverseSubtract; case 4: return MTLBlendOperationMin; case 5: return MTLBlendOperationMax; } return MTLBlendOperationAdd; }
 
 // Pipeline: cached by (program, target formats, blend / write mask, vertex layout, sample count)
@@ -4097,6 +4172,20 @@ static int pso_all_uint(const pso_key *k, NvShader *fs, int merged) {
     return n > 0;
 }
 static int pf_int_kind(MTLPixelFormat f);
+// Some written colour attachments are unsigned integer formats and some are not, and the integer ones are exactly the outputs the mixed entry point returns as integers (fn_m, mask_m:
+// Pokémon Sword's G-buffer, colour 1 RGBA16Uint between two float targets)
+static int pso_mixed_uint(const pso_key *k, NvShader *fs, int merged) {
+    int ints = 0, floats = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!k->cfmt[i]) continue;
+        int l = merged ? k->lmap[i] : i;
+        if (l == 0xff || (fs->rf.color_known && !(fs->rf.color_mask >> l & 1))) continue;   // an output the shader does not write
+        int u = mtl_fmt_uint((MTLPixelFormat)k->cfmt[i]);
+        if (u != (l < 8 && (fs->mask_m >> l & 1))) return 0;
+        if (u) ints++; else floats++;
+    }
+    return ints && floats;
+}
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs->fn; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;
@@ -4115,6 +4204,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
             if (hl) d.fragmentFunction = [hl newFunctionWithName:[NSString stringWithFormat:@"hl%d", i]];
             break; } }
     if (fs && fs->fn_u && !fsfn && d.fragmentFunction == fs->fn && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;   // integer colour targets (dmsh_build.py fs_uint)
+    else if (fs && fs->fn_m && !fsfn && d.fragmentFunction == fs->fn && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;   // integer and float colour targets
     if (vs->layer_out && k->fsfn != GEO_MARK) d.inputPrimitiveTopology = vs->geo_output == 1 ? MTLPrimitiveTopologyClassPoint : vs->geo_output == 6 ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
     if (k->fsfn == TF_MARK || k->fsfn == GEO_MARK) { d.vertexFunction = k->fsfn == GEO_MARK ? vs->geo_fn : vs->tf_fn; d.fragmentFunction = nil; d.rasterizationEnabled = NO; }   // transform feedback capture (tf_draw)
     d.rasterSampleCount = k->samples ? k->samples : 1;
@@ -4133,10 +4223,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         c.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
         // Integer targets: no blending. Maxwell ignores the blend enable on them; Metal refuses the pipeline (an assertion even without the API validation layer): Luigi's Mansion 3's integer G-buffer (PR #105)
         if (l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {
-            c.blendingEnabled = YES;
-            c.sourceRGBBlendFactor = bfac(k->blend[l].src_rgb); c.destinationRGBBlendFactor = bfac(k->blend[l].dst_rgb);
-            c.sourceAlphaBlendFactor = bfac(k->blend[l].src_a); c.destinationAlphaBlendFactor = bfac(k->blend[l].dst_a);
-            c.rgbBlendOperation = bop(k->blend[l].eq_rgb); c.alphaBlendOperation = bop(k->blend[l].eq_a);
+            c.blendingEnabled = YES; blend_st bl = adv_blend(k->blend[l]);
+            c.sourceRGBBlendFactor = bfac(bl.src_rgb); c.destinationRGBBlendFactor = bfac(bl.dst_rgb);
+            c.sourceAlphaBlendFactor = bfac(bl.src_a); c.destinationAlphaBlendFactor = bfac(bl.dst_a);
+            c.rgbBlendOperation = bop(bl.eq_rgb); c.alphaBlendOperation = bop(bl.eq_a);
         }
     }
     d.depthAttachmentPixelFormat = (MTLPixelFormat)k->dfmt; d.stencilAttachmentPixelFormat = (MTLPixelFormat)k->sfmt;

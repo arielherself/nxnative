@@ -187,6 +187,9 @@ NVN(nvnDeviceInstallDebugCallback, void, NVNdevice *d, const PFNNVNDEBUGCALLBACK
 }
 NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) { ((dev_t_ *)d)->origin = m; mtl_set_origin_lower_left(m == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT); LOG("[nvn] window origin %s", m ? "upper left (as D3D / Metal)" : "lower left (GL)"); }
 NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; mtl_set_depth_zero(m != 0); LOG("[nvn] depth mode %s", m ? "near=0 (as D3D / Metal)" : "near=-w (GL)"); }
+// Pokémon Sword sets neither mode and reads both, keeping NVN's defaults (lower-left origin, near = -w); the two were red stubs
+NVN(nvnDeviceGetWindowOriginMode, NVNwindowOriginMode, const NVNdevice *d) { return ((const dev_t_ *)d)->origin; }
+NVN(nvnDeviceGetDepthMode, NVNdepthMode, const NVNdevice *d) { return ((const dev_t_ *)d)->depth_mode; }
 NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (void)d; (void)h; }
 
 // ---------- Memory pools ----------
@@ -731,31 +734,38 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 // (when it re-records that material in place; packing the next recording right behind by used never touches them, since used includes the JUMP). So a segment remembers that guest range and is reclaimed when the game gives out memory
 // overlapping it; segments overflowing from a host segment keep the same range.
 // The segment pool grows on demand (SMBW opening course: many small command buffers each overflow once per frame, and the old fixed 64 segments × 1 MB ran out within 8 frames); abort only beyond HOSTSEG_CAP in total.
+// A segment is HOSTSEG_SZ, with two exceptions (hostseg_size): an empty pool with a length of at most HOSTSEG_SMALL outside a recording gets that much rounded up to HOSTSEG_SMALL
+// (Super Mario Odyssey hands out many such 512-byte grants before recording; at 256 KB each, and with no recording to reclaim them by, they reached the cap entering the Wooded
+// Kingdom), and a record larger than HOSTSEG_SZ gets a segment that holds it. A free segment is taken again only for a request of its own size; the cap counts every segment's bytes
 #define HOSTSEG_SZ (256u << 10)
+#define HOSTSEG_SMALL (4u << 10)
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
-typedef struct { uint8_t *mem; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
-static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg;
+typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
+static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
-// Take a segment: origin = the current recording's guest bytes [BEGIN, end of JUMP); if the write pointer is already in a host segment (overflowing again), keep that segment's origin
-static uint8_t *hostseg_take(const cmd_t *o) {
+static size_t hostseg_size(const cmd_t *o, int empty_pool, size_t want) {
+    if (empty_pool) return want && want <= HOSTSEG_SMALL && !o->recording ? HOSTSEG_SMALL : HOSTSEG_SZ;
+    return want + 16 > HOSTSEG_SZ ? (want + 16 + 0xfff) & ~(size_t)0xfff : HOSTSEG_SZ;   // 16: room for the next JUMP (want holds OP_RESERVE already, this is slack for the alignment)
+}
+// Take a segment of n bytes: origin = the current recording's guest bytes [BEGIN, end of JUMP); if the write pointer is already in a host segment (overflowing again), keep that segment's origin
+static uint8_t *hostseg_take(const cmd_t *o, size_t n) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
-    int in_seg = 0;
-    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && cur <= (uintptr_t)g_hostseg[i].mem + HOSTSEG_SZ) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
+    int in_seg = 0;   // by the segment's end too: a small segment can end where another one starts
+    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
     if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
     for (int i = 0; i < g_nhostseg && !m; i++)
-        if (!g_hostseg[i].busy) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, f, 1, lo, hi }; m = g_hostseg[i].mem; }
-    if (!m && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SZ <= HOSTSEG_CAP) {
+        if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi }; m = g_hostseg[i].mem; }
+    if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
         if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
-        m = malloc(HOSTSEG_SZ);
-        g_hostseg[g_nhostseg++] = (hostseg_t){ m, f, 1, lo, hi };
+        g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi }; g_hostseg_bytes += n;
     }
-    unsigned t = ++total; int n = g_nhostseg;
+    unsigned t = ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("NVN command memory: the game's pool is empty and host-lent segments reached %u MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
-    if (t == 1 || t % 1024 == 0) LOG("[nvn] the game's command memory ran short, the host lends a segment (%u times so far, frame %llu, segment pool %d segments × %u KB)", t, (unsigned long long)f, n, HOSTSEG_SZ >> 10);
+    if (t == 1 || t % 1024 == 0) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %d segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
     return m;
 }
 // The game gives out [lo, hi): segments whose recording's guest bytes overlap it are dead, reclaim them
@@ -766,7 +776,7 @@ static void hostseg_release(uintptr_t lo, uintptr_t hi) {
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
     const pool_t *pl = (const pool_t *)p;
-    if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } cmd_new_segment(CB(c), hostseg_take(CB(c)), HOSTSEG_SZ); return; }
+    if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
     hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
@@ -782,7 +792,7 @@ static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
         if (!o->cb || tries == 2) {
             static int once; if (!once++) LOG("[nvn] command memory: the game's callback did not add enough (cb=%p, need %u bytes), using a host-lent segment", (void *)o->cb, size + keep);
-            cmd_new_segment(o, hostseg_take(o), HOSTSEG_SZ); break;
+            size_t sz = hostseg_size(o, 0, size + keep); cmd_new_segment(o, hostseg_take(o, sz), sz); break;
         }
         if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.cbs++; pthread_mutex_unlock(&g_cs_mu); }
         { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ncb;
@@ -1027,10 +1037,12 @@ NVN(nvnBlendStateSetBlendFunc, void, NVNblendState *s, NVNblendFunc sr, NVNblend
     blend_st *o = ST(blend_st, s); o->src_rgb = sr; o->dst_rgb = dr; o->src_a = sa; o->dst_a = da;
 }
 NVN(nvnBlendStateSetBlendEquation, void, NVNblendState *s, NVNblendEquation er, NVNblendEquation ea) { ST(blend_st, s)->eq_rgb = er; ST(blend_st, s)->eq_a = ea; }
-// Advanced blend modes (NV_blend_equation_advanced: multiply, screen, overlay, ...) have no Metal blend state; mode 0 (none, which Luigi's Mansion 3 sets on every blend state) is the default
-NVN(nvnBlendStateSetAdvancedMode, void, NVNblendState *s, NVNblendAdvancedMode mode) {
-    (void)s; static int once; if (mode && !once++) LOG("[RED] nvnBlendStateSetAdvancedMode %d: advanced blend modes are not implemented, the state blends with its blend functions", mode);
-}
+// Advanced blend modes (NV_blend_equation_advanced): kept in the state, and while one is set the hardware ignores the blend functions. The replay blends the Porter-Duff modes with
+// the fixed-function factors they amount to (adv_blend in nvn_mtl.m); multiply, screen, overlay and the rest have no Metal blend state. Mode 0 (none, which Luigi's Mansion 3 sets
+// on every blend state) is the default; Mario vs. Donkey Kong 1.0.1 sets SRC_OVER (8) on one state in its levels
+NVN(nvnBlendStateSetAdvancedMode, void, NVNblendState *s, NVNblendAdvancedMode mode) { ST(blend_st, s)->adv = (unsigned)mode <= NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY ? mode : 0; }
+NVN(nvnBlendStateSetAdvancedPremultipliedSrc, void, NVNblendState *s, uint32_t pm) { ST(blend_st, s)->adv_npm = !B(pm); }
+NVN(nvnBlendStateSetAdvancedOverlap, void, NVNblendState *s, NVNblendAdvancedOverlap o) { ST(blend_st, s)->adv_ovl = (unsigned)o & 3; }
 NVN(nvnColorStateSetDefaults, void, NVNcolorState *s) { *ST(color_st, s) = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; }
 NVN(nvnColorStateSetBlendEnable, void, NVNcolorState *s, int i, uint32_t en) {
     color_st *o = ST(color_st, s); if (i < 0 || i > 7) return;
@@ -1417,8 +1429,8 @@ static void tsummary(uint64_t frame) {
             LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x", g_rt_comp_ms, g_rt_period_ms, rt_live ? "in effect" : "not in effect", okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, mtl_present_qos()); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
-    uint64_t up, re, fa, pr; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr);
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu; write-protection faults %llu, pages unprotected before host writes %llu; missed %llu (cumulative)", up, re, fa, pr, mtl_pkg_miss());
+    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr);
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu; missed %llu (cumulative)", up, re, es, fa, pr, mtl_pkg_miss());
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),
@@ -1650,6 +1662,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     gfx_enter();
     uint64_t t0 = now_ns();
+    { extern _Atomic uint64_t dm_present_ns; atomic_store(&dm_present_ns, t0); }   // DM_HITCH_DUMP (hle_thread.c)
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop);   // enqueue only, return immediately
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
@@ -1987,6 +2000,9 @@ NVN(nvnBlendStateGetBlendFunc, void, const NVNblendState *s, NVNblendFunc *sr, N
 NVN(nvnBlendStateGetBlendEquation, void, const NVNblendState *s, NVNblendEquation *er, NVNblendEquation *ea) {
     const blend_st *o = (const blend_st *)s; if (er) *er = (NVNblendEquation)o->eq_rgb; if (ea) *ea = (NVNblendEquation)o->eq_a;
 }
+NVN(nvnBlendStateGetAdvancedMode, NVNblendAdvancedMode, const NVNblendState *s) { return (NVNblendAdvancedMode)((const blend_st *)s)->adv; }
+NVN(nvnBlendStateGetAdvancedPremultipliedSrc, NVNboolean, const NVNblendState *s) { return !((const blend_st *)s)->adv_npm; }
+NVN(nvnBlendStateGetAdvancedOverlap, NVNblendAdvancedOverlap, const NVNblendState *s) { return (NVNblendAdvancedOverlap)((const blend_st *)s)->adv_ovl; }
 NVN(nvnPolygonStateGetCullFace, NVNface, const NVNpolygonState *s) { return (NVNface)((const poly_st *)s)->cull; }
 NVN(nvnPolygonStateGetFrontFace, NVNfrontFace, const NVNpolygonState *s) { return (NVNfrontFace)((const poly_st *)s)->front; }
 NVN(nvnPolygonStateGetPolygonMode, NVNpolygonMode, const NVNpolygonState *s) { return (NVNpolygonMode)((const poly_st *)s)->mode; }

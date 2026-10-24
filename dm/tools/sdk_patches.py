@@ -62,6 +62,12 @@ CUTS = {
     (0x145d0c, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x145d78, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # SDK 20.5.19 sdk 8bfebccd6f5c (BALL x PIT 1.293, Unity 6000.0.62f1): the same node area cut, for the same reason as Hollow Knight: Silksong's (Unity 6 takes all its memory through
+  # AllocateAddressRegion). The AddressRegionManager constructor is the SDK 20.5.22 build's above at the same offsets (sdk+0x145cfc, the limit at +0x145d0c, the occupied length at +0x145d78)
+  '8bfebccd6f5c1392597b364b9ab22a8d': [
+    (0x145d0c, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x145d78, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
   # Super Mario Galaxy 1.3.1 / Super Mario Galaxy 2 1.4.0 sdk (SDK 18.3.5, the same build in both): the same node area cut. Galaxy 2's movie player initializes its StandardAllocator with
   # virtual address memory (main+0x62c280: Initialize(nullptr, 384 MB)), which aborted at its CentralHeap::Init: a 256 MB alias region holds no region after a 1 GB node area.
   # The constructor is at sdk+0x13be3c (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte nodes, the area then registered as occupied at +0x13bee0)
@@ -108,15 +114,6 @@ CUTS = {
     (0x32c500, 'e9230b32', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
     (0x32c66c, 'ea030232', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
   ],
-  # Little Nightmares II 1.4 (v262144) sdk (SDK 10.4.1, the same build as The Great Ace Attorney Chronicles', which has no virtual address memory and never allocates an address region): the node area
-  # cut and regions of 1 GB and more aligned to 32 MB, as DRAGON QUEST XI S's SDK 7.3.2 build, whose code these match. Unreal Engine 4.25's nninitStartup takes one region for the whole engine
-  # (62 GB, cut to 2 GB in its patches.py). The AddressRegionManager constructor is at sdk+0x340e90 (the limit at +0x28 from orr w8,wzr,#0x3fe00000,
-  # the occupied length from orr w9); VammManager::AllocateAddressRegion's placement (sdk+0x341030) aligns 1 GB and more to 1 GB at +0x34109c
-  'd9add76fc264863d85fbbd1d70076c76': [
-    (0x340ea0, 'e8230b32', '087ca052', 'AddressRegionManager constructor: node area limit orr w8,wzr,#0x3fe00000 → mov w8,#0x3e00000'),
-    (0x340f3c, 'e9230b32', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
-    (0x34109c, 'ea030232', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
-  ],
   # SDK 8.2.1 sdk 5fd4f531c119 (Super Smash Bros. Ultimate 13.0.5; Catherine: Full Body 1.0.1a, which has no virtual address memory and never makes an address region): the node area cut,
   # and regions of 1 GB and more aligned to 32 MB, as DRAGON QUEST XI S's SDK 7.3.2 build, whose AddressRegionManager this is at other offsets. Smash's engine reserves one region for all its
   # memory (cut to 4 GB in its patches.py); with the 1 GB node area and 1 GB alignment it started 1.95 GB into the alias region (measured with a 64 GB one). The constructor is at
@@ -125,6 +122,25 @@ CUTS = {
     (0x336b50, 'e9230b32', '097ca052', 'AddressRegionManager constructor: node area limit orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
     (0x336bf0, 'e9230b32', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
     (0x336d5c, 'ea030232', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
+  ],
+  # SDK 10.4.1 sdk d9add76fc264 (Advance Wars 1+2: Re-Boot Camp 1.0.0, Unity 2020.2.1f3; Little Nightmares II 1.4, Unreal Engine 4.25, whose 62 GB engine region its patches.py cuts to 2 GB;
+  # The Last Campfire 1.0.5, Unity 2018.4.24f1; The Great Ace Attorney Chronicles 1.0.0, which has no virtual address memory and never makes an
+  # address region): the node area cut, and regions of 1 GB and more aligned to 32 MB, as DRAGON QUEST XI S's SDK 7.3.2 build, whose AddressRegionManager this is at other offsets.
+  # nninitStartup (main+0x365310) calls StandardAllocator::Initialize(nullptr, pool − used) with virtual address memory, which aborted at its CentralHeap::Init (sdk+0x2ee060), and that region
+  # is more than 1 GB. The constructor is at sdk+0x340e90 (the limit at +0x340ea0 from orr w8,wzr,#0x3fe00000, the occupied length at +0x340f3c from orr w9,wzr,#0x3fe00000);
+  # VammManager::AllocateAddressRegion (sdk+0x341030) aligns a region by its size: 64 KB under 2 MB, 2 MB under 4 MB, 4 MB under 32 MB, 32 MB under 1 GB, else 1 GB (+0x34109c)
+  'd9add76fc264863d85fbbd1d70076c76': [
+    (0x340ea0, 'e8230b32', '087ca052', 'AddressRegionManager constructor: node area limit orr w8,wzr,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x340f3c, 'e9230b32', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x34109c, 'ea030232', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
+  ],
+  # SDK 10.4.8 sdk 30a1e87b52f5 (Pikmin 4 1.1.1, Unreal Engine 4.26.2): the same cuts as the SDK 10.4.1 build above, whose AddressRegionManager this is at the same offsets (the constructor
+  # sdk+0x340e90, the node area limit +0x340ea0 and its occupied length +0x340f3c, AllocateAddressRegion's 1 GB alignment +0x34109c). Unreal's nninitStartup reserves its engine region
+  # (-SwitchVirtualAddressSpaceSize, the profile's game_args) in the alias region, so the region starts 62 MB in and a 4 GB region needs no 1 GB alignment slack
+  '30a1e87b52f5a2ac9879685cbfb93d7c': [
+    (0x340ea0, 'e8230b32', '087ca052', 'AddressRegionManager constructor: node area limit orr w8,wzr,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x340f3c, 'e9230b32', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x34109c, 'ea030232', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
   ],
   # Octopath Traveler 0 1.0.5 (v327680) sdk (SDK 19.3.13): the AddressRegionManager node area 0x3fe00000 → 0x3e00000 (62 MB), as Engage's SDK 12 (above). The same constructor (sdk+0x1423ec): +0x1423fc
   # sets the node area limit, +0x142468 registers it as an occupied region. Unreal's region (-SwitchVirtualAddressSpaceSize, the profile's game_args) then starts 62 MB into the alias region, and the guest

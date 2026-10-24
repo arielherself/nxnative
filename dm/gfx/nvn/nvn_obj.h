@@ -81,7 +81,8 @@ typedef struct {
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
 typedef struct { uint32_t blend_en : 8, logic_op : 4, alpha_func : 4; } color_st;            FITS(color_st, NVNcolorState);
 typedef struct { uint32_t mask; } chmask_st;            /* 4 bits per target: r=1 g=2 b=4 a=8, bit set = write */ FITS(chmask_st, NVNchannelMaskState);
-typedef struct { uint64_t target : 3, src_rgb : 7, dst_rgb : 7, src_a : 7, dst_a : 7, eq_rgb : 3, eq_a : 3; } blend_st;
+// adv: NVN advanced blend mode (0 = none); adv_npm: the source is not premultiplied (SetAdvancedPremultipliedSrc(false)); adv_ovl: overlap mode (0 = uncorrelated, the default)
+typedef struct { uint64_t target : 3, src_rgb : 7, dst_rgb : 7, src_a : 7, dst_a : 7, eq_rgb : 3, eq_a : 3, adv : 6, adv_npm : 1, adv_ovl : 2; } blend_st;
 FITS(blend_st, NVNblendState);
 typedef struct { uint8_t enable, samples, a2c, a2c_dither, raster_samples, cov_mod, cov2color_en, cov2color_out, sl_en, sl_grid; } ms_st;
 FITS(ms_st, NVNmultisampleState);
@@ -198,6 +199,7 @@ double mtl_presented_time(uint64_t n);
 void mtl_tex_init(const tex_t *t);      // TextureInitialize: the serial belongs to a live texture object until mtl_tex_release
 void mtl_tex_release(tex_t *t);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
+uint64_t mtl_pkg_edge_skips(void);   // packaged texture checks that found only writes beside the texture (pkg_edges_clean)
 uint64_t mtl_pkg_miss(void);
 uint64_t mtl_upload_ns_take(void);   // Take and zero: time spent uploading packaged textures on the submit thread since last time   // DM_NVN_DIRTYCHECK diagnostic: number of missed detections   // Packaged textures: number of first uploads, number of re-uploads due to pool content changes
 uint64_t mtl_upload_gpu_ns_take(void);   // Take and zero: GPU execution time of upload command buffers (sum of GPUEndTime − GPUStartTime)
