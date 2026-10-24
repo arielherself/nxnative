@@ -211,16 +211,24 @@ void front_save_failed(int err) {
 
 // Audio session: the frames RemoteIO asks for in each callback follow the I/O buffer duration, about 21 ms by default on iOS (1024 frames at 48 kHz). The game keeps only 4 blocks × 5 ms = 20 ms in flight,
 // so every callback came up 1.3 ms short and was zero-filled, about 47 gaps per second (crackling; reproducible on the Mac by forcing 1024-frame callbacks: 1999 underruns in 2000 callbacks). Ask for 5 ms and the system picks the nearest it supports;
-// the category stays the default SoloAmbient (silent switch and interrupting other apps' audio behave as before). Set once at boot and again on return to the foreground (the system may reset it after an interruption)
+// Set once at boot and again on return to the foreground (the system may reset it after an interruption).
+// The category is the player's (DM_AUDIO_SESSION, a launcher setting, dm/games/settings.tsv; Documents/env.txt can set it): soloambient (the default, iOS's own) is muted by the Ring / Silent
+// switch and stops other apps' audio; playback plays in silent mode and stops other apps' audio; playback-mix plays in silent mode and mixes with other apps' audio (MixWithOthers: the
+// game is then not the Now Playing app). None of them plays in the background (the app declares no background audio), and calls and alarms interrupt each of them alike (front_ios_audio_watch)
 static int g_session_off;   // the last activation failed (another app or a call still held the session): tried again when the app becomes active
 void front_ios_audio_session(void) {
     AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
-    if (![s setCategory:AVAudioSessionCategorySoloAmbient error:&e]) LOG("[RED] audio session category could not be set: %s", e.localizedDescription.UTF8String);
+    const char *want = getenv("DM_AUDIO_SESSION"); if (!want || !*want) want = "soloambient";
+    AVAudioSessionCategory cat = AVAudioSessionCategorySoloAmbient; AVAudioSessionCategoryOptions opt = 0;
+    if (!strcmp(want, "playback")) cat = AVAudioSessionCategoryPlayback;
+    else if (!strcmp(want, "playback-mix")) { cat = AVAudioSessionCategoryPlayback; opt = AVAudioSessionCategoryOptionMixWithOthers; }
+    else if (strcmp(want, "soloambient")) { static int once; if (!once++) LOG("[RED] DM_AUDIO_SESSION=%s is none of soloambient, playback, playback-mix: soloambient", want); want = "soloambient"; }
+    if (![s setCategory:cat withOptions:opt error:&e]) LOG("[RED] audio session category %s could not be set: %s", want, e.localizedDescription.UTF8String);
     [s setPreferredSampleRate:48000 error:nil];
     if (![s setPreferredIOBufferDuration:0.005 error:&e]) LOG("[RED] audio session I/O buffer duration could not be set: %s", e.localizedDescription.UTF8String);
     g_session_off = ![s setActive:YES error:&e];
     if (g_session_off) LOG("[RED] audio session activation failed: %s", e.localizedDescription.UTF8String);
-    LOG("audio session: sample rate %.0f Hz, I/O buffer %.2f ms (asked for 5 ms)", s.sampleRate, s.IOBufferDuration * 1000);
+    LOG("audio session: %s, sample rate %.0f Hz, I/O buffer %.2f ms (asked for 5 ms)", want, s.sampleRate, s.IOBufferDuration * 1000);
 }
 
 // Real audio output is suspended (the silent sink paces the game) while the app is in the background or another audio session has interrupted ours (Siri, an alarm, a call).
