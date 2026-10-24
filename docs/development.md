@@ -786,6 +786,11 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 - **Status:** the provisional profile needed no change: on an iPhone 16 Pro it boots, plays at 60 fps (p50 16.66 ms, no frame dropped) with a 470 MB footprint and no red line.
 - **Saves:** `save:/ba.ba` (global), `save:/<slot>ba.ba` (slot n+1, named in `Data/Editor/editor_menudata.lua`), `Settings.txt` and `levels/`. The INI files are the PC version's, byte for byte in format (LF, the same sections), so a PC save (`%APPDATA%\Baba_Is_You\0ba.ba` and `ba.ba`; not `SettingsC.txt`, the PC controls) copied into the app's `Documents/save/` while the game is closed carries the progress over (the host clones `save/` into `save.work` at each mount).
 
+**The Last Campfire (`0100449011506000`), packed on Linux, checked on an iPhone**
+- **Engine:** Unity 2018.4.24f1 IL2CPP, SDK 10.4.1, NVN; update 1.0.5 (`v327680`). Virtual address memory: the 5 GB guest layout, Engage's 2.5 GB pool (the heap check needs a Mac), and the node-area cut of the SDK 10.4.1 `sdk` build it shares with Advance Wars 1+2 and Little Nightmares II (`sdk_patches.py`).
+- **Shaders:** 11,435, everything in `Data/data.unity3d` and `Data/Resources`, files without type trees. Its 4 `ComputeShader` objects (Unity's `Internal-Skinning` and the game's `FogTextureGenerator`, three kernels) need Unity 2018.4's layout (`unityfs.py` `COMPUTE_2018_4`, taken from AssetRipper's TypeTreeDumps), in which a kernel is its own one variant: without them the fog was drawn as large flat planes over the scenes.
+- **Status:** the provisional profile needed only the pool: on an iPhone 16 Pro it plays at 60 fps (frame time p50 16.66 ms, p95 17.1 ms, no frame dropped) with a 1650 MiB footprint. Two red lines, two pipelines whose pixel shader reads `user(locn3)`, which its vertex shader does not write: pre-2019.3 Unity subprograms hold one stage each, so the split pairs no vertex and pixel shaders by variant and `vs_pad` pads none of them; nothing was seen missing in play.
+
 ## Tools (`dm/tools`)
 
 | Tool | What it does |
