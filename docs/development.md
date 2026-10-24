@@ -719,6 +719,12 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 - **Memory:** the engine region is 2 GB by a cut of the 62 GB constant at all seven reservation paths, not by `-SwitchVirtualAddressSpaceSize=`, which in this build skips the reservation (the size stands for "reserved"); FMallocBinned3 (UE 4.25: 18 vtable slots, no `TryMalloc`) is replaced by the host's allocator through DRAGON QUEST VII Reimagined's gate; the `sdk` takes DRAGON QUEST XI S's node area and alignment cuts (its `patches.py`, `sdk_patches.py`, `game.tsv`).
 - **First run on an iPhone 16 Pro:** the first start compiles 21,646 source libraries in 21 min; later starts and reinstalls with the same shaders skip it. 7.5 minutes of play at the game's 30 fps (frame time p50 33.4 ms, GPU 21.7 ms a frame, 1,063 draws a frame, 1.76 GB footprint), no red line but four audio device stalls. The host fix it needed is general: `up_begin` hands the encode thread its records before waiting for an upload slot.
 
+**Baba Is You (`01002CD00A51C000`), packed on Linux, checked on an iPhone**
+- **Engine:** Chowdren (Clickteam Fusion compiled to C++) running the game's Lua scripts, SDK 13.3.2, NVN; update 1.0.10 (`v655360`). No virtual address memory: an ordinary heap in a 4 GB block.
+- **Shaders:** 224 GLSLC outputs of several stages in the RomFS (`shader_split.py`, `e98a115`).
+- **Status:** the provisional profile needed no change: on an iPhone 16 Pro it boots, plays at 60 fps (p50 16.66 ms, no frame dropped) with a 470 MB footprint and no red line.
+- **Saves:** `save:/ba.ba` (global), `save:/<slot>ba.ba` (slot n+1, named in `Data/Editor/editor_menudata.lua`), `Settings.txt` and `levels/`. The INI files are the PC version's, byte for byte in format (LF, the same sections), so a PC save (`%APPDATA%\Baba_Is_You\0ba.ba` and `ba.ba`; not `SettingsC.txt`, the PC controls) copied into the app's `Documents/save/` while the game is closed carries the progress over (the host clones `save/` into `save.work` at each mount).
+
 ## Tools (`dm/tools`)
 
 | Tool | What it does |

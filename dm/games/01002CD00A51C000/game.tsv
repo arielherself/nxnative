@@ -1,0 +1,41 @@
+# Baba Is You: Hempuli Oy, Chowdren (Clickteam Fusion compiled to C++) with the game's Lua scripts, SDK 13.3.2, NVN; update 1.0.10 (v655360).
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) on Linux and checked on an iPhone 16 Pro: it needed no change, boots to its title and plays at 60 fps (470 MB)
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	01002CD00A51C000
+program_id	01002CD00A51C000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Baba Is You
+ipa	BabaIsYou.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v655360	1.0.10	main=41b84c0224fe835a6b0f5bad7e096208	sdk=357efc198e728cb5d55265aff304f03c
+package	v655360
+shader_versions	v655360
+
+# ---- Files ----
+# load order as on Horizon: main, sdk. Assets.dat holds the pictures and sounds; Data/ the Lua scripts and the levels (Data/Worlds/*/*.ld)
+modules	main sdk
+romfs_marker	Assets.dat
+zip_store	.dat:.ogg:.png:.ttf:.metallib
+# Saves (the save mount, save:/): ba.ba (global), <slot>ba.ba (slot n+1's progress: Data/Editor/editor_menudata.lua), Settings.txt and levels/ (the editor's). The INI files are the PC
+# version's, so a PC save (%APPDATA%\Baba_Is_You\0ba.ba and ba.ba, not its SettingsC.txt) copied into the app's Documents/save/ with the game closed carries over
+
+# ---- Memory ----
+# no virtual address memory (the NPDM declares no system resource); main sets a heap of at most the pool − 64 MB: a 3328 MB heap region in a 4 GB block. The rewritten modules
+# with main's 71 MB bss are larger than the default 64 MB of used memory
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+mem_used	0x6200000
+
+# ---- Shader split ----
+# 224 shaders: GLSLC outputs of several stages in the RomFS (shader_split.py, e98a115)
+shader_groups	/Data/=data
+shader_note	Baba Is You shaders (provisional profile)
