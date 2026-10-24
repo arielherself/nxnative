@@ -162,7 +162,7 @@ static const shinfo *sh_find(const char *key) { shinfo k; memcpy(k.key, key, 16)
 
 static void dev_init_once(void) {
     @autoreleasepool {
-        g_dev = (__bridge id<MTLDevice>)mtl_device();
+        g_dev = (__bridge id<MTLDevice>)mtl_device_classic();
         g_q = [g_dev newCommandQueueWithMaxCommandBufferCount:64]; g_q.label = @"vk";
         g_ev = [g_dev newSharedEvent];
         g_dss_off = [g_dev newDepthStencilStateWithDescriptor:[MTLDepthStencilDescriptor new]];
