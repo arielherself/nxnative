@@ -1,11 +1,12 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController). Both are merged and handed to the host through dm_input_set (hle_hid.c, bit layout in dm_input.h).
-//   Two layouts, three in handheld mode; one tap on the layout button at the top centre (labelled with the current layout, "2D" / "3D" / "Tap") goes to the next, and the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
+//   Three layouts, four in handheld mode; one tap on the layout button at the top centre (labelled with the current layout, "2D" / "3D" / "Tap" / "D-pad") goes to the next, and the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   Tap (touch): no control but the layout button, every other touch goes to the game's touch screen; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
 //   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
 //     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
 //     Breath of the Wild crouches with L3 and uses the scope with R3; 3D World and Breath of the Wild turn the camera with the right stick.
+//   D-pad (dpad): the 2D layout with an 8-way D-pad, as large as the left stick's ring, in the stick's place and no stick: for grid games that move one step per press (Baba Is You).
 //   Touch-down ownership: locked keys first (shoulders, − / +, the layout button, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
 //     then in 3D the right stick for a touch in the right third.
 //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
@@ -90,7 +91,7 @@ static const CGFloat
     K_RSWIPE = 1.0 / 3,                             // right stick area: this fraction of the screen width from the right edge (not in u)
     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
-static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap, 3 = D-pad (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
@@ -109,7 +110,7 @@ static __weak DmGamepad *g_view;
     UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
     unsigned _hapticSticks;
     BOOL _stickShown;                              // the left stick was held at the last refresh
-    BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
+    BOOL _full, _tap, _pad;                        // the 3D layout / the Tap layout / the D-pad layout is current
     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
@@ -127,7 +128,8 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
     t.string = s; t.alignmentMode = kCAAlignmentCenter; t.foregroundColor = k_text.CGColor; t.contentsScale = UIScreen.mainScreen.scale;
     [parent addSublayer:t]; return t;
 }
-static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   // keys shown only in the 3D layout
+static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   // keys shown only in the 3D layout (the D-pad arms also in the D-pad layout)
+static BOOL isArm(int b) { return b >= B_LEFT && b <= B_DOWN; }
 
 - (instancetype)initWithFrame:(CGRect)f {
     if ((self = [super initWithFrame:f])) {
@@ -158,7 +160,8 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
-        _full = l == 1; _tap = l == 2;
+        if (l < 0 || l > 3) l = 0;
+        _full = l == 1; _tap = l == 2; _pad = l == 3;
         [self applyLayout];
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserver:self selector:@selector(padsChanged) name:GCControllerDidConnectNotification object:nil];
@@ -170,15 +173,15 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 }
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full);
-    _ring.hidden = _knob.hidden = _tap;
-    _swapLabel.string = _tap ? @"Tap" : _full ? @"3D" : @"2D";
+    for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full && !(_pad && isArm(b)));
+    _ring.hidden = _knob.hidden = _tap || _pad;
+    _swapLabel.string = _tap ? @"Tap" : _full ? @"3D" : _pad ? @"D-pad" : @"2D";
     [CATransaction commit];
 }
-- (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → 2D: release every touch first (no key stays held), save, lay out again
-    int l = _tap ? 0 : _full ? (dm_opmode() == 0 ? 2 : 0) : 1;
+- (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → D-pad → 2D: release every touch first (no key stays held), save, lay out again
+    int l = _pad ? 0 : _tap ? 3 : _full ? (dm_opmode() == 0 ? 2 : 3) : 1;
     [self reset];
-    _full = l == 1; _tap = l == 2;
+    _full = l == 1; _tap = l == 2; _pad = l == 3;
     [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:k_layout_key];
     [self applyLayout]; [self setNeedsLayout];
 }
@@ -197,8 +200,9 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
 - (BOOL)inRightArea:(CGPoint)p { CGRect b = self.bounds; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
-- (CGPoint)dpadCenter { CGRect s = self.corner; CGFloat u = self.u; return side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u); }
-- (CGFloat)dpadR { return K_DPAD_R * self.u; }
+- (CGPoint)dpadCenter { if (_pad) return self.stickHome; CGRect s = self.corner; CGFloat u = self.u; return side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u); }
+- (CGFloat)dpadScale { return _pad ? K_STICK_R / K_DPAD_R : 1; }   // the D-pad layout's D-pad: the left stick's ring size
+- (CGFloat)dpadR { return K_DPAD_R * self.dpadScale * self.u; }
 static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
 static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
 - (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; BOOL z = b == B_ZL || b == B_ZR;
@@ -304,8 +308,8 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         // diamond, D-pad, left stick: take the one with the smallest distance / grab radius, if it is <= 1
         CGFloat best = 1; int kind = C_NONE, idx = 0;
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
-        if (_full) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
-        if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
+        if (_full || _pad) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
+        if (!_stick[0] && !_pad) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
         if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
@@ -392,8 +396,9 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
         }
     }
     static const struct { int b; CGFloat angle; } arms[] = {{B_UP, 0}, {B_RIGHT, M_PI_2}, {B_DOWN, M_PI}, {B_LEFT, -M_PI_2}};   // the same arm in 90° steps
-    for (int i = 0; i < 4; i++) setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * u, K_ARM_IN * u, arms[i].angle, 6 * u));
-    CGPoint sc = self.swapCenter; setPath(_swap, circlePath(sc, K_SWAP_R * u)); placeLabel(_swapLabel, sc, 12 * u);
+    CGFloat ds = self.dpadScale;
+    for (int i = 0; i < 4; i++) setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * ds * u, K_ARM_IN * ds * u, arms[i].angle, 6 * ds * u));
+    CGPoint sc = self.swapCenter; setPath(_swap, circlePath(sc, K_SWAP_R * u)); placeLabel(_swapLabel, sc, (_pad ? 8.5 : 12) * u);   // "D-pad" is wider than "2D" / "3D" / "Tap"
     setPath(_ring, circlePath(self.stickHome, [self stickR:0]));
     CGFloat k = K_KNOB_R * u; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
     setPath(_knob, circlePath(CGPointMake(k, k), k));

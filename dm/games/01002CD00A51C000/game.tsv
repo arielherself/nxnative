@@ -11,6 +11,8 @@ program_id	01002CD00A51C000
 name	Baba Is You
 ipa	BabaIsYou.ipa
 app_category	public.app-category.games
+# a grid game that moves one step per press (its own controls map movement to the D-pad as well as the stick): the D-pad layout
+pad_layout	dpad
 
 # ---- Versions ----
 build	v655360	1.0.10	main=41b84c0224fe835a6b0f5bad7e096208	sdk=357efc198e728cb5d55265aff304f03c
