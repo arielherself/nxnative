@@ -1699,6 +1699,10 @@ def mac_gpu_arch(work, env, logs):
     return arch
 
 
+def has_rows(path):   # a table with a row besides its comments (a profile's empty shader_pairs.tsv holds only its header)
+    return path.is_file() and any(l.strip() and not l.startswith('#') for l in path.read_text().splitlines())
+
+
 def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     """PLATFORM 'mac-app', an NVN game with shader pairs: its pipeline archive made offline for this Mac's GPU (dm/gfx/tools/pso_offline.py --platform macos, metal-tt), which the app carries as
     Resources/pso and the launcher hands to the host as DM_PSO_BUNDLE, as the iOS app does (docs/development.md, The pipeline archive made offline): the app's first start builds no base,
@@ -1735,7 +1739,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS) and an environment file.
     The save and the log go to the player's Library, keyed by the folder's title ID (app); a new app replaces the old one only when it is complete"""
     lib = msl / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl')
-    pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
+    pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and has_rows(g.table('shader_pairs.tsv')) else None   # a stage of its own, before the app's
     PROG.stage('Mac app', step='starting')
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', game / 'RomFS', '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']

@@ -89,7 +89,7 @@ else cp "$GD/shader_map.tsv" "$GD/pso_manifest.tsv" "$GD/c1_full.tsv" Gen/dm/ ||
 # it unread). It goes into the app as pso/ (main.m hands it to the host as DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about
 # 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build; made again only when its inputs change (the libraries, the pairs, the profile's depth_mode, metal-tt)
 PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"
-if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=g18p; else GPUS=none; fi
+if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ] && [ "$MAC" = YES ]; then GPUS=g18p; else GPUS=none; fi   # off a Mac there is no metal-tt, and the libraries are MSL source: the device builds the bases
 if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
   PSO=$W/build/ios/pso/bundle
   t "pipeline archive for $GPUS (metal-tt; minutes when its inputs changed)"
