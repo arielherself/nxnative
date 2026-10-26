@@ -13,6 +13,7 @@ static void dummy_kind(NSString *t, uint8_t *tt, uint8_t *pf) {
     else if ([t hasPrefix:@"texture3d"]) y = MTLTextureType3D;
     else if ([t hasPrefix:@"texture1d_array"]) y = MTLTextureType1DArray;
     else if ([t hasPrefix:@"texture1d"]) y = MTLTextureType1D;
+    else if ([t hasPrefix:@"texture_buffer"]) y = MTLTextureTypeTextureBuffer;
     *tt = (uint8_t)y;
     *pf = [t hasPrefix:@"depth"] ? NVN_DPF_DEPTH : [t containsString:@"<uint"] ? NVN_DPF_UINT : [t containsString:@"<int"] ? NVN_DPF_SINT : NVN_DPF_FLOAT;
 }
@@ -27,7 +28,7 @@ static int arr_len(NSString *ty, NSString **el) {
     return [[ty substringWithRange:NSMakeRange(NSMaxRange(c), ty.length - 1 - NSMaxRange(c))] intValue];
 }
 
-// Whether a storage buffer binding may be written: route A's reflection says so ("rw"); route B's does not, and there SPIRV-Cross types a buffer the shader never writes as const device
+// Whether a storage buffer binding may be written: current B reflection carries the translator's write flag ("rw"); old samples without it fall back to SPIRV-Cross's const device qualifier.
 static int sbuf_rw(NSDictionary *b) { id rw = b[@"rw"]; if (rw) return [rw boolValue]; id ty = b[@"msl_type"]; return !([ty isKindOfClass:[NSString class]] && [ty hasPrefix:@"const "]); }
 int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
     memset(o, 0, sizeof *o);
